@@ -1,0 +1,21 @@
+{
+  "name": "webrtc",
+  "version": "1.0.0",
+  "description": "Implementation of SFU worker and signaling server.",
+  "main": "app.ts",
+  "scripts": {
+    "start": "nodemon app.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "mediasoup": "^3.19.2",
+    "socket.io": "^4.8.1",
+    "ts-node": "^10.9.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
