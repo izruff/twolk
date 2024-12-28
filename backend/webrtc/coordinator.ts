@@ -10,27 +10,79 @@ implementing router migration policies from one worker to another.
 
 */
 
+import mediasoupClient from "mediasoup-client";
+
+
+interface Space {
+  uuid: string;
+}
+
+export interface MemberData {
+  name: string;
+}
+
+interface MemberState {
+  // TODO: isMuted, etc.
+}
+
+interface Member {
+  id: number;
+  spaceUuid: string;
+  routerId: string;
+  data: MemberData;
+  state: MemberState;
+  producerId: number;
+  memberToConsumerIdMap: Map<number, number>;
+}
+
+interface Router {
+  id: number;
+  spaceUuid: string;
+}
+
+type TransportStatus = "unallocated" | "allocated" | "connected";
+
+export interface TransportMetadata {
+  options: mediasoupClient.types.TransportOptions;
+}
+
+interface Transport {
+  id: number;
+  routerId: number;
+  isProducer: number;
+  status: TransportStatus;
+  metadata?: TransportMetadata;
+}
+
 export class Coordinator {
+  spaces: Map<string, Space>
+  members: Map<number, Member>
+  routers: Map<number, Router>
+  transports: Map<number, Transport>
+
   constructor() {
-    return;
+    this.spaces = new Map();
+    this.members = new Map();
+    this.routers = new Map();
+    this.transports = new Map();
   }
 
-  openSpace(id: number) {
+  openSpace(id: string) {
     // TODO
     return;
   }
 
-  closeSpace(id: number, validationToken?: number) {
+  closeSpace(id: string, validationToken?: string) {
     // TODO
     return;
   }
 
-  addMemberToSpace(spaceId: number): { memberId: number } {
+  addMemberToSpace(spaceId: string): { memberId: string } {
     // TODO
-    return { memberId: 0 }
+    return { memberId: "" };
   }
 
-  removeMemberFromSpace(spaceId: number, memberId: number) {
+  removeMemberFromSpace(spaceId: number, producerId: number) {
     // TODO
     return;
   }
