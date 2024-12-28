@@ -11,14 +11,26 @@ import { Coordinator } from "./coordinator.ts";
 
 import mediasoup from "mediasoup";
 
+
 export class SfuWorker {
-  // This is currently just a wrapper of the mediasoup worker.
   mediasoupWorker: mediasoup.types.Worker
   coordinator: Coordinator
+
+  routers: Map<number, mediasoup.types.Router>
 
   constructor(worker: mediasoup.types.Worker, coordinator: Coordinator) {
     this.mediasoupWorker = worker;
     this.coordinator = coordinator;
+
+    coordinator.consume(
+      "newRouterRequest", async ({ assignedId }, ack, nack) => {
+        try {
+          await this.createRouter(assignedId);
+          ack();
+        } catch (err) {
+          nack(err);
+        }
+      });
   }
 
   static async create(
@@ -36,5 +48,10 @@ export class SfuWorker {
     return new SfuWorker(worker, coordinator);
   }
 
-  // TODO
+  async createRouter(assignedRouterId: number) {
+    // TODO: Not sure what the router options should be
+    const router = await this.mediasoupWorker.createRouter();
+    this.routers.set(assignedRouterId, router);
+  }
 }
+

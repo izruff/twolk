@@ -54,17 +54,33 @@ interface Transport {
   metadata?: TransportMetadata;
 }
 
+type QueuePayloadTypeMap = {
+  newRouterRequest: { assignedId: number };
+}
+
+type QueueConsumerCallback<K extends keyof QueuePayloadTypeMap> = (
+  payload: QueuePayloadTypeMap[K], ack: () => void, nack: (e: Error) => void
+) => void | Promise<void>;
+
+type QueueConsumerCallbackCollection = {
+  [K in keyof QueuePayloadTypeMap]: QueueConsumerCallback<K>[];
+};
+
 export class Coordinator {
   spaces: Map<string, Space>
   members: Map<number, Member>
   routers: Map<number, Router>
   transports: Map<number, Transport>
 
+  queueConsumerCallbacks: QueueConsumerCallbackCollection
+
   constructor() {
     this.spaces = new Map();
     this.members = new Map();
     this.routers = new Map();
     this.transports = new Map();
+
+    this.queueConsumerCallbacks = { newRouterRequest: [] };
   }
 
   openSpace(id: string) {
@@ -85,5 +101,14 @@ export class Coordinator {
   removeMemberFromSpace(spaceId: number, producerId: number) {
     // TODO
     return;
+  }
+
+  // This is supposed to come from a message broker client class, but here we
+  // assume this function acts like it consumes from a message queue.
+  consume<K extends keyof QueuePayloadTypeMap>(
+    queueName: K, callback: QueueConsumerCallback<K>
+  ) {
+    const callbackList = this.queueConsumerCallbacks[queueName];
+    callbackList.push(callback);
   }
 }
