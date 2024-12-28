@@ -9,31 +9,88 @@ horizontally and manage communication between servers.
 
 */
 
-import { Coordinator } from "./coordinator.ts";
+import { Coordinator, MemberData, MemberState, TransportMetadata } from "./coordinator.ts";
 
 import https from "node:https";
 import { Server } from "socket.io";
+import mediasoup from "mediasoup";
+import mediasoupClient from "mediasoup-client";
 
-interface Member {
-  name: string,
-}
+
+type MemberEventType = "join" | "leave";
 
 interface ServerToClientEvents {
-  // TODO
+
+  initializeSpace: (
+    data: {
+      rtpCapabilities: mediasoup.types.RtpCapabilities,
+      memberDataMap: Map<number, MemberData>,
+      memberInitialStateMap: Map<number, MemberState>,
+      producerMetadataMap: Map<number, TransportMetadata>,
+    }
+  ) => void;
+
+  producerEvent: (
+    event: {
+      memberId: number,
+      type: MemberEventType,
+    }
+  ) => void;
+
 }
+
 
 interface ClientToServerEvents {
-  // TODO
+
+  disconnect: () => void;
+
+  createWebRtcTransport: (
+    args: { asProducer: boolean },
+    callback: (options: mediasoupClient.types.TransportOptions) => void,
+  ) => Promise<void>;
+
+  transportConnect: (
+    args: { dtlsParameters: mediasoup.types.DtlsParameters },
+  ) => void;
+
+  transportProduce: (
+    args: {
+      kind: mediasoup.types.MediaKind,
+      rtpParameters: mediasoup.types.RtpParameters,
+      appData: mediasoup.types.AppData,
+    },
+    callback: (id: string) => void,
+  ) => void;
+
+  transportRecvConnect: (
+    args: { dtlsParameters: mediasoup.types.DtlsParameters },
+  ) => Promise<void>;
+
+  consume: (
+    args: {
+      rtpCapabilities: mediasoup.types.RtpCapabilities,
+      producerId: number,
+    },
+    callback: (options: mediasoupClient.types.ConsumerOptions) => void,
+  ) => Promise<void>;
+
+  consumerResume: (
+    args: { producerId: number },
+  ) => Promise<void>;
+
 }
+
 
 interface InterServerEvents {
-  // TODO
+  // nothing here
 }
 
+
 interface SocketData {
-  spaceId: string,
-  member: Member,
+  spaceUuid: string;
+  memberData: MemberData;
 }
+
 
 export function createWsSignalingServer(
   httpsOptions: https.ServerOptions,
@@ -44,7 +101,7 @@ export function createWsSignalingServer(
   server.listen(port);
 
   const io = new Server<
-    ServerToClientEvents, ClientToServerEvents, InterServerEvents, SocketData
+    ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData
   >(server);
 
   io.on("connection", async (socket) => {
@@ -53,3 +110,4 @@ export function createWsSignalingServer(
 
   return io;
 }
+

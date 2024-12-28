@@ -21,7 +21,7 @@ export interface MemberData {
   name: string;
 }
 
-interface MemberState {
+export interface MemberState {
   // TODO: isMuted, etc.
 }
 
