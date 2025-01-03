@@ -9,7 +9,10 @@ horizontally and manage communication between servers.
 
 */
 
-import { Coordinator, MemberData, MemberState, TransportMetadata } from "./coordinator.ts";
+import {
+  Coordinator, SpaceData, MemberData, MemberState, TransportMetadata,
+  type QueuePayloadTypeMap,
+} from "./coordinator.ts";
 
 import https from "node:https";
 import { Server as BaseServer, Socket as BaseSocket } from "socket.io";
@@ -19,14 +22,14 @@ import mediasoupClient from "mediasoup-client";
 
 interface Member {
   id: number;
+  space: Space;
   data: MemberData;
   state: MemberState;
-  producerMetadata: TransportMetadata;
 }
 
 interface Space {
   uuid: string;
-  rtpCapabilities: mediasoup.types.RtpCapabilities;
+  data: SpaceData;
   members: Map<number, Member>;
 }
 
@@ -35,7 +38,7 @@ type MemberEventType = "spaceInit";
 
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
-    rtpCapabilities: mediasoup.types.RtpCapabilities,
+    data: SpaceData,
     members: Map<number, Member>,
   };
 }
@@ -148,7 +151,6 @@ class SignalingServer {
 
   spaces: Map<string, Space>
   members: Map<number, Member>
-  memberIdToSpace: Map<number, Space>
 
   _prepareSpaceResolvers: Map<string, (() => void)[]>
   _prepareMemberResolvers: Map<string, ((memberId: number) => void)[]>
@@ -162,10 +164,13 @@ class SignalingServer {
 
     this.spaces = new Map();
     this.members = new Map();
-    this.memberIdToSpace = new Map();
 
     this._prepareSpaceResolvers = new Map();
     this._prepareMemberResolvers = new Map();
+
+    // No need for cancel callbacks since only one server is used currently
+    this.coordinator.consume("openSpaceResult", this.onOpenSpaceResult);
+    this.coordinator.consume("addMemberResult", this.onAddMemberResult);
 
     this.server.on("connection", this.onConnection);
   }
@@ -203,13 +208,13 @@ class SignalingServer {
 
       const space = this.spaces.get(socket.id)!;
       socket.emit("memberEvent", "spaceInit", {
-        rtpCapabilities: space.rtpCapabilities,
+        data: space.data,
         members: space.members,
       });
       this.connections.get(socketId)!.memberId = memberId;
       // It is important to set this below here because this map will be used 
       // to broadcast updates, and we want to make sure no updates were missed
-      // after the spaceInitialData event.
+      // after the memberEvent emission.
       this.memberIdToSocket.set(memberId, socket);
     } catch (err: any) {
       console.log(err);
@@ -223,7 +228,7 @@ class SignalingServer {
     }
     await this.coordinator.openSpace(uuid);
 
-    const key = "prepareSpace:" + uuid;
+    const key = uuid;
     return new Promise((resolve) => {
       const map = this._prepareSpaceResolvers;
       if (!map.has(key)) {
@@ -246,7 +251,7 @@ class SignalingServer {
     await this.coordinator.addMemberToSpace(spaceUuid, socketId,
       memberData, memberState);
 
-    const key = "prepareMember:" + socketId;
+    const key = socketId;
     return new Promise((resolve) => {
       const map = this._prepareMemberResolvers;
       if (!map.has(key)) {
@@ -256,6 +261,43 @@ class SignalingServer {
     });
   }
 
+  onOpenSpaceResult({ uuid, data }: QueuePayloadTypeMap["openSpaceResult"],
+    ack: () => void, nack: (e: Error) => void) {
+    if (!this.spaces.has(uuid)) {
+      this.spaces.set(uuid, { uuid, data, members: new Map() });
+    }
+
+    const resolvers = this._prepareSpaceResolvers.get(uuid);
+    if (resolvers !== undefined) {
+      resolvers.forEach((resolve) => { resolve(); });
+    }
+
+    ack();  // assume everything works as expected
+  }
+
+  onAddMemberResult({ id, spaceUuid, data, state, tempId }
+    : QueuePayloadTypeMap["addMemberResult"], ack: () => void,
+    nack: (e: Error) => void) {
+    if (!this.members.has(id)) {
+      const space = this.spaces.get(spaceUuid);
+      if (space === undefined) {
+        // This might happen if the space is already closed and the member
+        // came in late, but I'm not too sure.
+      } else {
+        const member = { id, space, data, state };
+        this.members.set(id, member);
+        this.spaces.get(spaceUuid)!.members.set(id, member);
+      }
+    }
+
+    const resolvers = this._prepareMemberResolvers.get(tempId);
+    if (resolvers !== undefined) {
+      resolvers.forEach((resolve) => { resolve(id); });
+    }
+
+    ack();  // assume everything works as expected
+  }
+
   updateMember(memberId: number, update: Partial<MemberState>) {
     const member = this.members.get(memberId);
     if (member === undefined) {
@@ -263,7 +305,7 @@ class SignalingServer {
     }
     member.state = { ...member.state, ...update };
 
-    this.memberIdToSpace.get(memberId)!.members.forEach((_, id) => {
+    this.members.get(memberId)!.space.members.forEach((_, id) => {
       this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
         memberId, newState: member.state
       });
@@ -271,7 +313,10 @@ class SignalingServer {
   }
 
   deleteMember(memberId: number) {
-    // TODO
+    if (this.members.has(memberId)) {
+      this.members.get(memberId)!.space.members.delete(memberId);
+      this.members.delete(memberId);
+    }
   }
 }
 

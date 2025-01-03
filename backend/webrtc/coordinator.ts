@@ -10,11 +10,19 @@ implementing router migration policies from one worker to another.
 
 */
 
+import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
 
 
+export interface SpaceData {
+  rtpCapabilities: mediasoup.types.RtpCapabilities,
+}
+
 interface Space {
   uuid: string;
+  primaryRouter: Router;
+  data: SpaceData;
+  members: Map<number, Member>
 }
 
 export interface MemberData {
@@ -27,17 +35,17 @@ export interface MemberState {
 
 interface Member {
   id: number;
-  spaceUuid: string;
-  routerId: string;
+  space: Space;
+  router: Router;
   data: MemberData;
   state: MemberState;
-  producerId: number;
-  memberToConsumerIdMap: Map<number, number>;
+  producer: Transport;
+  memberToConsumerMap: Map<number, Transport>;
 }
 
 interface Router {
   id: number;
-  spaceUuid: string;
+  space: Space;
 }
 
 type TransportStatus = "unallocated" | "allocated" | "connected";
@@ -48,8 +56,8 @@ export interface TransportMetadata {
 
 interface Transport {
   id: number;
-  routerId: number;
-  isProducer: number;
+  router: Router;
+  isProducer: boolean;
   status: TransportStatus;
   metadata?: TransportMetadata;
 }
@@ -60,10 +68,19 @@ interface Transport {
 // TODO: The payloads for the result queues all assume that they never fail.
 // Currently, if something fails, the worker or signaling server throws an
 // error or process exits.
-type QueuePayloadTypeMap = {
+export type QueuePayloadTypeMap = {
   newRouterRequest: { assignedId: number };
-  openSpaceResult: undefined;
-  addMemberResult: { memberId: number };
+  openSpaceResult: {
+    uuid: string,
+    data: SpaceData,
+  };
+  addMemberResult: {
+    id: number,
+    spaceUuid: string,
+    data: MemberData,
+    state: MemberState,
+    tempId: string,
+  };
 }
 
 type QueueConsumerCallback<K extends keyof QueuePayloadTypeMap> = (
@@ -86,7 +103,12 @@ export class Coordinator {
 
   queueConsumerCallbacks: QueueConsumerCallbackCollection
 
-  static _memberIdCounter: number = 0
+  // These should be okay because these resources are not permanent and the
+  // traffic should not exceed this maximum limit.
+  static MAX_COUNTER = 2 << 32
+  static _routerIdCounter = 0
+  static _memberIdCounter = 0
+  static _transportIdCounter = 0
 
   constructor() {
     this.spaces = new Map();
@@ -102,9 +124,59 @@ export class Coordinator {
     };
   }
 
-  async openSpace(uuid: string) {
+  _getNewRouterId() {
+    const id = Coordinator._routerIdCounter;
+    Coordinator._routerIdCounter = (Coordinator._routerIdCounter + 1) % Coordinator.MAX_COUNTER;
+  }
+
+  _getNewMemberId() {
+    const id = Coordinator._memberIdCounter;
+    Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
+  }
+
+  _createNewTransport(router: Router, isProducer: boolean): Transport {
+    const id = Coordinator._transportIdCounter;
+    Coordinator._transportIdCounter = (Coordinator._transportIdCounter + 1) % Coordinator.MAX_COUNTER;
+
+    const transport: Transport = { id, router, isProducer, status: "unallocated" };
+    this.transports.set(id, transport);
+    this._allocateTransport(transport);
+
+    return transport;
+  }
+
+  _allocateTransport(transport: Transport) {
     // TODO
-    return;
+  }
+
+  // When we scale the workers, we might need this to distribute members across
+  // multiple resources. For now, we just allocate one router for each space;
+  // we call this the primary router.
+  _allocateRouter(space: Space): Router {
+    return space.primaryRouter;
+  }
+
+  async openSpace(uuid: string) {
+    // Allocate a router for this space. For now, we assume each space uses
+    // exactly one router, and only one worker is present.
+    const assignedId = Coordinator._routerIdCounter;
+    Coordinator._routerIdCounter = (Coordinator._routerIdCounter + 1) % Coordinator.MAX_COUNTER;
+
+    this.publish("newRouterRequest", { assignedId }, () => {
+      // Deep-copy the object instead of sharing reference
+      const space = structuredClone(this.routers.get(assignedId)!.space);
+      this.publish("openSpaceResult", { uuid: space.uuid, data: space.data },
+        () => {
+          // No need to do anything for now.
+        },
+        (e: Error) => {
+          // TODO: Need retry mechanism
+          throw new Error("openSpaceResult nacked: " + e.message);
+        });
+    }, (e: Error) => {
+      // TODO: Need retry mechanism
+      throw new Error("newRouterRequest nacked: " + e.message);
+    });
   }
 
   async closeSpace(uuid: string, validationToken?: string) {
@@ -114,8 +186,33 @@ export class Coordinator {
 
   async addMemberToSpace(spaceUuid: string, tempId: string,
     memberData: MemberData, memberState: MemberState) {
-    // TODO
-    return;
+    const id = Coordinator._memberIdCounter;
+    Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
+
+    const space = this.spaces.get(spaceUuid)!;
+    const router = this._allocateRouter(space);
+    const newMember: Member = {
+      id, space, router, data: memberData, state: memberState,
+      producer: this._createNewTransport(router, true),
+      memberToConsumerMap: new Map(),
+    };
+    space.members.forEach((other) => {
+      if (other.id !== id) {
+        newMember.memberToConsumerMap.set(other.id,
+          this._createNewTransport(router, false));
+      }
+    });
+    this.members.set(id, newMember);
+    space.members.set(id, newMember);
+
+    this.publish("addMemberResult", {
+      id, spaceUuid, data: memberData, state: memberState, tempId
+    }, () => {
+      // No need to do anything for now.
+    }, (e: Error) => {
+      // TODO: Need retry mechanism
+      throw new Error("addMemberResult nacked: " + e.message);
+    });
   }
 
   async removeMemberFromSpace(spaceUuid: string, memberId: number) {
@@ -137,5 +234,20 @@ export class Coordinator {
       callbackSet.delete(callback);
     };
     return cancelCallback;
+  }
+
+  // Again, this function acts like it publishes to a message queue. Think of
+  // the ack() and nack() functions as a message to a reply-to queue, used for
+  // acknowledging the message and notifying the publisher if it was successful
+  // or not.
+  // TODO: We are under the assumption that there is only one consumer per
+  // queue, which allows for ack() to take no parameters.
+  publish<K extends keyof QueuePayloadTypeMap>(
+    queueName: K, payload: QueuePayloadTypeMap[K],
+    onAck: () => void, onNack: (e: Error) => void,
+  ) {
+    this.queueConsumerCallbacks[queueName].forEach((callback) => {
+      callback(payload, onAck, onNack);
+    });
   }
 }
