@@ -30,7 +30,7 @@ export class SfuWorker {
         } catch (err) {
           nack(err);
         }
-      });
+      });  // No need for cancel callback since only one worker is used currently
   }
 
   static async create(
