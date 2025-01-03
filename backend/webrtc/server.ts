@@ -31,7 +31,31 @@ interface Space {
 }
 
 
-type SpaceEventType = "end";
+type MemberEventType = "spaceInit";
+
+interface MemberEventContentMap extends Record<MemberEventType, any> {
+  spaceInit: {
+    rtpCapabilities: mediasoup.types.RtpCapabilities,
+    members: Map<number, Member>,
+  };
+}
+
+type SpaceWideEventType = "memberJoin" | "memberLeave" | "memberStateUpdate"
+  | "spaceClose";
+
+interface SpaceWideEventContentMap extends Record<SpaceWideEventType, any> {
+  memberJoin: {
+    member: Member,
+  };
+  memberLeave: {
+    memberId: number,
+  };
+  memberStateUpdate: {
+    memberId: number,
+    newState: MemberState,
+  };
+}
+
 
 interface ServerToClientEvents {
 
@@ -39,24 +63,14 @@ interface ServerToClientEvents {
 
   connectionFailed: (error: { message: string }) => void;
 
-  spaceInitialData: (
-    data: {
-      rtpCapabilities: mediasoup.types.RtpCapabilities,
-      members: Map<number, Member>,
-    }
+  memberEvent: <K extends keyof MemberEventContentMap>(
+    type: K,
+    content: MemberEventContentMap[K]
   ) => void;
 
-  spaceEvent: (
-    event: {
-      type: SpaceEventType,
-    }
-  ) => void;
-
-  spaceMemberEvent: (
-    event: {
-      memberId: number,
-      newState: MemberState,
-    }
+  spaceWideEvent: <K extends keyof SpaceWideEventContentMap>(
+    type: K,
+    content: SpaceWideEventContentMap[K]
   ) => void;
 
 }
@@ -188,7 +202,7 @@ class SignalingServer {
         socket.data.memberData, {});
 
       const space = this.spaces.get(socket.id)!;
-      socket.emit("spaceInitialData", {
+      socket.emit("memberEvent", "spaceInit", {
         rtpCapabilities: space.rtpCapabilities,
         members: space.members,
       });
@@ -250,7 +264,7 @@ class SignalingServer {
     member.state = { ...member.state, ...update };
 
     this.memberIdToSpace.get(memberId)!.members.forEach((_, id) => {
-      this.memberIdToSocket.get(id)!.emit("spaceMemberEvent", {
+      this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
         memberId, newState: member.state
       });
     });
