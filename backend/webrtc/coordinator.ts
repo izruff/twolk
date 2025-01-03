@@ -83,22 +83,23 @@ export class Coordinator {
     this.queueConsumerCallbacks = { newRouterRequest: [] };
   }
 
-  openSpace(id: string) {
+  async openSpace(uuid: string) {
     // TODO
     return;
   }
 
-  closeSpace(id: string, validationToken?: string) {
+  async closeSpace(uuid: string, validationToken?: string) {
     // TODO
     return;
   }
 
-  addMemberToSpace(spaceId: string): { memberId: string } {
+  async addMemberToSpace(spaceUuid: string, tempId: string,
+    memberData: MemberData, memberState: MemberState) {
     // TODO
-    return { memberId: "" };
+    return;
   }
 
-  removeMemberFromSpace(spaceId: number, producerId: number) {
+  async removeMemberFromSpace(spaceUuid: string, memberId: number) {
     // TODO
     return;
   }
