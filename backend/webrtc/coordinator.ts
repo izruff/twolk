@@ -92,18 +92,7 @@ export type QueuePayloadTypeMap = {
   };
   transportUpdateStream: {
     id: number,
-  }
-  // openSpaceResult: {
-  //   uuid: string,
-  //   data: SpaceData,
-  // };
-  // addMemberResult: {
-  //   id: number,
-  //   spaceUuid: string,
-  //   data: MemberData,
-  //   state: MemberState,
-  //   tempId: string,
-  // };
+  };
 }
 
 export type QueueResponseTypeMap = {
@@ -274,6 +263,7 @@ export class Coordinator {
 
     const space = this.spaces.get(spaceUuid)!;
     const router = this._allocateRouter(space);
+
     const newMember: Member = {
       id, space, router, data: memberData, state: memberState,
       producer: this._createNewTransport(router, true),
@@ -289,5 +279,50 @@ export class Coordinator {
     space.members.set(id, newMember);
 
     ack({ id });
+  };
+
+  onRemoveMemberRequest: QueueConsumerCallback<"removeMemberRequest"> =
+    ({ id }, ack, nack) => {
+    const member = this.members.get(id);
+    if (member === undefined) {
+      nack(new Error("member not found"));
+      return;
+    }
+
+    this.transports.forEach((transport) => {
+      if (transport.router.id === member.router.id) {
+        this.transports.delete(transport.id);
+      }
+    });
+
+    // TODO: These transports will require some cleanup.
+    this.transports.delete(member.producer.id);
+    member.memberToConsumerMap.forEach((transport) => {
+      this.transports.delete(transport.id);
+    });
+
+    member.space.members.delete(id);
+    this.members.delete(id);
+
+    ack();
+  };
+
+  onUnsubscribeFromSpaceRequest: QueueConsumerCallback<"unsubscribeFromSpaceRequest"> =
+    ({ uuid }, ack, nack) => {
+    const space = this.spaces.get(uuid);
+    if (space === undefined) {
+      nack(new Error("space not found"));
+      return;
+    }
+    if (space.members.size > 0) {
+      nack(new Error("space still not empty"));
+      return;
+    }
+
+    // TODO: Clean up routers associated to the space
+
+    this.spaces.delete(uuid);
+
+    ack();
   };
 }

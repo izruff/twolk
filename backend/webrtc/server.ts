@@ -152,9 +152,6 @@ class SignalingServer {
   spaces: Map<string, Space>
   members: Map<number, Member>
 
-  _prepareSpaceResolvers: Map<string, (() => void)[]>
-  _prepareMemberResolvers: Map<string, ((memberId: number) => void)[]>
-
   constructor(server: Server, coordinator: Coordinator) {
     this.server = server;
     this.coordinator = coordinator;
@@ -164,9 +161,6 @@ class SignalingServer {
 
     this.spaces = new Map();
     this.members = new Map();
-
-    this._prepareSpaceResolvers = new Map();
-    this._prepareMemberResolvers = new Map();
 
     this.server.on("connection", this.onConnection);
   }
@@ -292,11 +286,55 @@ class SignalingServer {
     });
   }
 
-  deleteMember(memberId: number) {
-    if (this.members.has(memberId)) {
-      this.members.get(memberId)!.space.members.delete(memberId);
-      this.members.delete(memberId);
+  async deleteMember(memberId: number): Promise<void> {
+    if (!this.members.has(memberId)) {
+      return Promise.resolve();
     }
+
+    const promise = new Promise<void>((resolve) => {
+      this.coordinator.publish("removeMemberRequest", { id: memberId },
+        () => {
+          if (this.members.has(memberId)) {
+            this.members.get(memberId)!.space.members.delete(memberId);
+            this.members.delete(memberId);
+          }
+
+          // TODO: Notify other members in the space
+
+          resolve();
+        },
+        (e: Error) => {
+          // TODO: Need retry mechanism
+          throw new Error("failed to delete member: " + e.message);
+        });
+    });
+
+    return promise;
+  }
+
+  async deleteSpace(spaceUuid: string): Promise<void> {
+    if (!this.spaces.has(spaceUuid)) {
+      return Promise.resolve();
+    }
+    if (this.spaces.get(spaceUuid)!.members.size > 0) {
+      throw new Error("space still not empty");
+    }
+
+    const promise = new Promise<void>((resolve) => {
+      this.coordinator.publish("unsubscribeFromSpaceRequest",
+        { uuid: spaceUuid },
+        () => {
+          if (this.spaces.has(spaceUuid)) {
+            this.spaces.delete(spaceUuid);
+          }
+          resolve();
+        },
+        (e: Error) => {
+          // TODO: Need retry mechanism
+          throw new Error("failed to delete space: " + e.message);
+        });
+    });
+
+    return promise;
   }
 }
-
