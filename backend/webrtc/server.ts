@@ -168,10 +168,6 @@ class SignalingServer {
     this._prepareSpaceResolvers = new Map();
     this._prepareMemberResolvers = new Map();
 
-    // No need for cancel callbacks since only one server is used currently
-    this.coordinator.consume("openSpaceResult", this.onOpenSpaceResult);
-    this.coordinator.consume("addMemberResult", this.onAddMemberResult);
-
     this.server.on("connection", this.onConnection);
   }
 
@@ -226,16 +222,22 @@ class SignalingServer {
     if (this.spaces.has(uuid)) {
       return Promise.resolve();
     }
-    await this.coordinator.openSpace(uuid);
 
-    const key = uuid;
-    return new Promise((resolve) => {
-      const map = this._prepareSpaceResolvers;
-      if (!map.has(key)) {
-        map.set(key, []);
-      }
-      map.get(key)!.push(resolve);
+    const promise = new Promise<void>((resolve) => {
+      this.coordinator.publish("subscribeToSpaceRequest", { uuid },
+        ({ data }) => {
+          if (!this.spaces.has(uuid)) {
+            this.spaces.set(uuid, { uuid, data, members: new Map() });
+          }
+          resolve();
+        },
+        (e: Error) => {
+          // TODO: Need retry mechanism
+          throw new Error("failed to prepare space: " + e.message);
+        });
     });
+
+    return promise;
   }
 
   async prepareMember(spaceUuid: string, socketId: string,
@@ -248,54 +250,32 @@ class SignalingServer {
       console.log("warning: member already exists when calling prepareMember");
       return Promise.resolve(this.connections.get(socketId)!.memberId!);
     }
-    await this.coordinator.addMemberToSpace(spaceUuid, socketId,
-      memberData, memberState);
 
-    const key = socketId;
-    return new Promise((resolve) => {
-      const map = this._prepareMemberResolvers;
-      if (!map.has(key)) {
-        map.set(key, []);
-      }
-      map.get(key)!.push(resolve);
+    const promise = new Promise<number>((resolve) => {
+      this.coordinator.publish("addMemberRequest", {
+        spaceUuid, memberData, memberState
+      }, ({ id }) => {
+        if (!this.members.has(id)) {
+          const space = this.spaces.get(spaceUuid);
+          if (space === undefined) {
+            // This might happen if the space is already closed and the member
+            // came in late, but I'm not too sure.
+          } else {
+            const member: Member = {
+              id, space, data: memberData, state: memberState
+            };
+            this.members.set(id, member);
+            this.spaces.get(spaceUuid)!.members.set(id, member);
+          }
+        }
+        resolve(id);
+      }, (e: Error) => {
+        // TODO: Need retry mechanism
+        throw new Error("failed to prepare member: " + e.message);
+      })
     });
-  }
 
-  onOpenSpaceResult({ uuid, data }: QueuePayloadTypeMap["openSpaceResult"],
-    ack: () => void, nack: (e: Error) => void) {
-    if (!this.spaces.has(uuid)) {
-      this.spaces.set(uuid, { uuid, data, members: new Map() });
-    }
-
-    const resolvers = this._prepareSpaceResolvers.get(uuid);
-    if (resolvers !== undefined) {
-      resolvers.forEach((resolve) => { resolve(); });
-    }
-
-    ack();  // assume everything works as expected
-  }
-
-  onAddMemberResult({ id, spaceUuid, data, state, tempId }
-    : QueuePayloadTypeMap["addMemberResult"], ack: () => void,
-    nack: (e: Error) => void) {
-    if (!this.members.has(id)) {
-      const space = this.spaces.get(spaceUuid);
-      if (space === undefined) {
-        // This might happen if the space is already closed and the member
-        // came in late, but I'm not too sure.
-      } else {
-        const member = { id, space, data, state };
-        this.members.set(id, member);
-        this.spaces.get(spaceUuid)!.members.set(id, member);
-      }
-    }
-
-    const resolvers = this._prepareMemberResolvers.get(tempId);
-    if (resolvers !== undefined) {
-      resolvers.forEach((resolve) => { resolve(id); });
-    }
-
-    ack();  // assume everything works as expected
+    return promise;
   }
 
   updateMember(memberId: number, update: Partial<MemberState>) {

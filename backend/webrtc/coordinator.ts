@@ -69,32 +69,87 @@ interface Transport {
 // Currently, if something fails, the worker or signaling server throws an
 // error or process exits.
 export type QueuePayloadTypeMap = {
-  newRouterRequest: { assignedId: number };
-  openSpaceResult: {
+  // Requests from coordinator to create a new router for a space
+  newRouterRequest: {
+    assignedId: number,
+  };
+  subscribeToSpaceRequest: {
     uuid: string,
-    data: SpaceData,
   };
-  addMemberResult: {
-    id: number,
+  addMemberRequest: {
     spaceUuid: string,
-    data: MemberData,
-    state: MemberState,
-    tempId: string,
+    memberData: MemberData,
+    memberState: MemberState,
   };
+  removeMemberRequest: {
+    id: number,
+  }
+  unsubscribeFromSpaceRequest: {
+    uuid: string,
+  };
+  spaceUpdateStream: {
+    uuid: string,
+  };
+  transportUpdateStream: {
+    id: number,
+  }
+  // openSpaceResult: {
+  //   uuid: string,
+  //   data: SpaceData,
+  // };
+  // addMemberResult: {
+  //   id: number,
+  //   spaceUuid: string,
+  //   data: MemberData,
+  //   state: MemberState,
+  //   tempId: string,
+  // };
 }
 
-type QueueConsumerCallback<K extends keyof QueuePayloadTypeMap> = (
-  payload: QueuePayloadTypeMap[K], ack: () => void, nack: (e: Error) => void
+export type QueueResponseTypeMap = {
+  newRouterRequest: void;
+  subscribeToSpaceRequest: {
+    data: SpaceData,
+  };
+  addMemberRequest: {
+    id: number,
+  };
+  removeMemberRequest: void;
+  unsubscribeFromSpaceRequest: void;
+  spaceUpdateStream: {
+    spaceUuid: string,
+  };
+  transportUpdateStream: {
+    memberId: string,
+  }
+}
+
+// Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
+type QueueTypes = keyof QueuePayloadTypeMap & keyof QueueResponseTypeMap;
+
+type QueueConsumerCallback<K extends QueueTypes> = (
+  payload: QueuePayloadTypeMap[K], ack: (resp: QueueResponseTypeMap[K]) => void, nack: (e: Error) => void
 ) => void | Promise<void>;
 
 type QueueConsumerCallbackCollection = {
-  [K in keyof QueuePayloadTypeMap]: Set<QueueConsumerCallback<K>>;
+  [K in QueueTypes]: Set<QueueConsumerCallback<K>>;
 };
 
 
 export class Coordinator {
-  // This is a mock implementation of a service which will later only receive
-  // requests in gRPC.
+  /*
+  This is a mock implementation of the coordinator service. In reality, this service
+  should be a separate microservice that communicates with the signaling server
+  and SFU workers via gRPC bidirectional streaming.
+  
+  The `queueConsumerCallbacks` map was meant to simulate message queues that the
+  coordinator service would publish to/consume from. Originally, it was meant as a
+  message broker simulator, but after some thinking, our needs are more aligned to a
+  request-response pattern that goes both ways; gRPC would be better suited for this.
+
+  Instead of changing the code to fit gRPC right away, we keep this as is for now,
+  but make it so that we can send messages both ways.
+  */
 
   spaces: Map<string, Space>
   members: Map<number, Member>
@@ -119,9 +174,16 @@ export class Coordinator {
     // TODO: Automate this set instantiations
     this.queueConsumerCallbacks = {
       newRouterRequest: new Set(),
-      openSpaceResult: new Set(),
-      addMemberResult: new Set(),
+      subscribeToSpaceRequest: new Set(),
+      addMemberRequest: new Set(),
+      removeMemberRequest: new Set(),
+      unsubscribeFromSpaceRequest: new Set(),
+      spaceUpdateStream: new Set(),
+      transportUpdateStream: new Set(),
     };
+
+    this.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest);
+    this.consume("addMemberRequest", this.onAddMemberRequest);
   }
 
   _getNewRouterId() {
@@ -156,7 +218,40 @@ export class Coordinator {
     return space.primaryRouter;
   }
 
-  async openSpace(uuid: string) {
+  // This is supposed to come from a message broker client class, but here we
+  // assume this function acts like it consumes from a message queue. Also,
+  // we don't implement tags here; for simplicity we just include tags in the
+  // message content if needed.
+  consume<K extends QueueTypes>(
+    queueName: K, callback: QueueConsumerCallback<K>
+  ): (() => void) {
+    const callbackSet = this.queueConsumerCallbacks[queueName];
+    callbackSet.add(callback);
+
+    const cancelCallback = () => {
+      callbackSet.delete(callback);
+    };
+    return cancelCallback;
+  }
+
+  // Again, this function acts like it publishes to a message queue. Think of
+  // the ack() and nack() functions as a message to a reply-to queue, used for
+  // acknowledging the message and notifying the publisher if it was successful
+  // or not.
+  // TODO: We are under the assumption that there is only one consumer per
+  // queue, which allows for ack() to take no parameters.
+  publish<K extends QueueTypes>(
+    queueName: K, payload: QueuePayloadTypeMap[K],
+    onAck: (resp: QueueResponseTypeMap[K]) => void,
+    onNack: (e: Error) => void,
+  ) {
+    this.queueConsumerCallbacks[queueName].forEach((callback) => {
+      callback(payload, onAck, onNack);
+    });
+  }
+
+  onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
+    ({ uuid }, ack, nack) => {
     // Allocate a router for this space. For now, we assume each space uses
     // exactly one router, and only one worker is present.
     const assignedId = Coordinator._routerIdCounter;
@@ -164,28 +259,16 @@ export class Coordinator {
 
     this.publish("newRouterRequest", { assignedId }, () => {
       // Deep-copy the object instead of sharing reference
-      const space = structuredClone(this.routers.get(assignedId)!.space);
-      this.publish("openSpaceResult", { uuid: space.uuid, data: space.data },
-        () => {
-          // No need to do anything for now.
-        },
-        (e: Error) => {
-          // TODO: Need retry mechanism
-          throw new Error("openSpaceResult nacked: " + e.message);
-        });
+      const space = this.routers.get(assignedId)!.space;
+      ack({ data: structuredClone(space.data) });
     }, (e: Error) => {
       // TODO: Need retry mechanism
       throw new Error("newRouterRequest nacked: " + e.message);
     });
   }
 
-  async closeSpace(uuid: string, validationToken?: string) {
-    // TODO
-    return;
-  }
-
-  async addMemberToSpace(spaceUuid: string, tempId: string,
-    memberData: MemberData, memberState: MemberState) {
+  onAddMemberRequest: QueueConsumerCallback<"addMemberRequest"> =
+    ({ spaceUuid, memberData, memberState }, ack, nack) => {
     const id = Coordinator._memberIdCounter;
     Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
 
@@ -205,49 +288,6 @@ export class Coordinator {
     this.members.set(id, newMember);
     space.members.set(id, newMember);
 
-    this.publish("addMemberResult", {
-      id, spaceUuid, data: memberData, state: memberState, tempId
-    }, () => {
-      // No need to do anything for now.
-    }, (e: Error) => {
-      // TODO: Need retry mechanism
-      throw new Error("addMemberResult nacked: " + e.message);
-    });
-  }
-
-  async removeMemberFromSpace(spaceUuid: string, memberId: number) {
-    // TODO
-    return;
-  }
-
-  // This is supposed to come from a message broker client class, but here we
-  // assume this function acts like it consumes from a message queue. Also,
-  // we don't implement tags here; for simplicity we just include tags in the
-  // message content if needed.
-  consume<K extends keyof QueuePayloadTypeMap>(
-    queueName: K, callback: QueueConsumerCallback<K>
-  ): (() => void) {
-    const callbackSet = this.queueConsumerCallbacks[queueName];
-    callbackSet.add(callback);
-
-    const cancelCallback = () => {
-      callbackSet.delete(callback);
-    };
-    return cancelCallback;
-  }
-
-  // Again, this function acts like it publishes to a message queue. Think of
-  // the ack() and nack() functions as a message to a reply-to queue, used for
-  // acknowledging the message and notifying the publisher if it was successful
-  // or not.
-  // TODO: We are under the assumption that there is only one consumer per
-  // queue, which allows for ack() to take no parameters.
-  publish<K extends keyof QueuePayloadTypeMap>(
-    queueName: K, payload: QueuePayloadTypeMap[K],
-    onAck: () => void, onNack: (e: Error) => void,
-  ) {
-    this.queueConsumerCallbacks[queueName].forEach((callback) => {
-      callback(payload, onAck, onNack);
-    });
-  }
+    ack({ id });
+  };
 }
