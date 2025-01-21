@@ -160,7 +160,7 @@ export class Coordinator {
 
   // These should be okay because these resources are not permanent and the
   // traffic should not exceed this maximum limit.
-  static MAX_COUNTER = 2 << 32
+  static MAX_COUNTER = Number.MAX_SAFE_INTEGER
   static _routerIdCounter = 0
   static _memberIdCounter = 0
   static _transportIdCounter = 0

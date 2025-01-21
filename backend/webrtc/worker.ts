@@ -22,12 +22,14 @@ export class SfuWorker {
     this.mediasoupWorker = worker;
     this.coordinator = coordinator;
 
+    this.routers = new Map();
+
     coordinator.consume(
       "newRouterRequest", async ({ assignedId }, ack, nack) => {
         try {
           await this.createRouter(assignedId);
           ack();
-        } catch (err) {
+        } catch (err: any) {
           nack(err);
         }
       });  // No need for cancel callback since only one worker is used currently
