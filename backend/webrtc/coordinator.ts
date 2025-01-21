@@ -73,6 +73,10 @@ export type QueuePayloadTypeMap = {
   newRouterRequest: {
     assignedId: number,
   };
+  newTransportRequest: {
+    routerId: number,
+    consumesFromTransportId?: number,  // Only for consumer transports
+  };
   subscribeToSpaceRequest: {
     uuid: string,
   };
@@ -97,6 +101,7 @@ export type QueuePayloadTypeMap = {
 
 export type QueueResponseTypeMap = {
   newRouterRequest: void;
+  newTransportRequest: void;
   subscribeToSpaceRequest: {
     data: SpaceData,
   };
@@ -105,18 +110,14 @@ export type QueueResponseTypeMap = {
   };
   removeMemberRequest: void;
   unsubscribeFromSpaceRequest: void;
-  spaceUpdateStream: {
-    spaceUuid: string,
-  };
-  transportUpdateStream: {
-    memberId: string,
-  }
+  spaceUpdateStream: void;
+  transportUpdateStream: void;
 }
 
 // Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
 type QueueTypes = keyof QueuePayloadTypeMap & keyof QueueResponseTypeMap;
 
-type QueueConsumerCallback<K extends QueueTypes> = (
+export type QueueConsumerCallback<K extends QueueTypes> = (
   payload: QueuePayloadTypeMap[K], ack: (resp: QueueResponseTypeMap[K]) => void, nack: (e: Error) => void
 ) => void | Promise<void>;
 
@@ -163,6 +164,7 @@ export class Coordinator {
     // TODO: Automate this set instantiations
     this.queueConsumerCallbacks = {
       newRouterRequest: new Set(),
+      newTransportRequest: new Set(),
       subscribeToSpaceRequest: new Set(),
       addMemberRequest: new Set(),
       removeMemberRequest: new Set(),
@@ -173,16 +175,21 @@ export class Coordinator {
 
     this.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest);
     this.consume("addMemberRequest", this.onAddMemberRequest);
+    this.consume("removeMemberRequest", this.onRemoveMemberRequest);
+    this.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest);
+    this.consume("transportUpdateStream", this.onTransportUpdate);
   }
 
   _getNewRouterId() {
     const id = Coordinator._routerIdCounter;
     Coordinator._routerIdCounter = (Coordinator._routerIdCounter + 1) % Coordinator.MAX_COUNTER;
+    return id;
   }
 
   _getNewMemberId() {
     const id = Coordinator._memberIdCounter;
     Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
+    return id;
   }
 
   _createNewTransport(router: Router, isProducer: boolean): Transport {
@@ -241,88 +248,99 @@ export class Coordinator {
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
     ({ uuid }, ack, nack) => {
-    // Allocate a router for this space. For now, we assume each space uses
-    // exactly one router, and only one worker is present.
-    const assignedId = Coordinator._routerIdCounter;
-    Coordinator._routerIdCounter = (Coordinator._routerIdCounter + 1) % Coordinator.MAX_COUNTER;
+      // Allocate a router for this space. For now, we assume each space uses
+      // exactly one router, and only one worker is present.
+      const assignedId = this._getNewRouterId();
 
-    this.publish("newRouterRequest", { assignedId }, () => {
-      // Deep-copy the object instead of sharing reference
-      const space = this.routers.get(assignedId)!.space;
-      ack({ data: structuredClone(space.data) });
-    }, (e: Error) => {
-      // TODO: Need retry mechanism
-      throw new Error("newRouterRequest nacked: " + e.message);
-    });
-  }
+      this.publish("newRouterRequest", { assignedId }, () => {
+        // Deep-copy the object instead of sharing reference
+        const space = this.routers.get(assignedId)!.space;
+        ack({ data: structuredClone(space.data) });
+      }, (e: Error) => {
+        // TODO: Need retry mechanism
+        throw new Error("newRouterRequest nacked: " + e.message);
+      });
+    }
 
   onAddMemberRequest: QueueConsumerCallback<"addMemberRequest"> =
     ({ spaceUuid, memberData, memberState }, ack, nack) => {
-    const id = Coordinator._memberIdCounter;
-    Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
+      const id = this._getNewMemberId();
 
-    const space = this.spaces.get(spaceUuid)!;
-    const router = this._allocateRouter(space);
+      const space = this.spaces.get(spaceUuid)!;
+      const router = this._allocateRouter(space);
 
-    const newMember: Member = {
-      id, space, router, data: memberData, state: memberState,
-      producer: this._createNewTransport(router, true),
-      memberToConsumerMap: new Map(),
+      const newMember: Member = {
+        id, space, router, data: memberData, state: memberState,
+        producer: this._createNewTransport(router, true),
+        memberToConsumerMap: new Map(),
+      };
+      space.members.forEach((other) => {
+        if (other.id !== id) {
+          newMember.memberToConsumerMap.set(other.id,
+            this._createNewTransport(router, false));
+        }
+      });
+      this.members.set(id, newMember);
+      space.members.set(id, newMember);
+
+      ack({ id });
     };
-    space.members.forEach((other) => {
-      if (other.id !== id) {
-        newMember.memberToConsumerMap.set(other.id,
-          this._createNewTransport(router, false));
-      }
-    });
-    this.members.set(id, newMember);
-    space.members.set(id, newMember);
-
-    ack({ id });
-  };
 
   onRemoveMemberRequest: QueueConsumerCallback<"removeMemberRequest"> =
     ({ id }, ack, nack) => {
-    const member = this.members.get(id);
-    if (member === undefined) {
-      nack(new Error("member not found"));
-      return;
-    }
-
-    this.transports.forEach((transport) => {
-      if (transport.router.id === member.router.id) {
-        this.transports.delete(transport.id);
+      const member = this.members.get(id);
+      if (member === undefined) {
+        nack(new Error("member not found"));
+        return;
       }
-    });
 
-    // TODO: These transports will require some cleanup.
-    this.transports.delete(member.producer.id);
-    member.memberToConsumerMap.forEach((transport) => {
-      this.transports.delete(transport.id);
-    });
+      this.transports.forEach((transport) => {
+        if (transport.router.id === member.router.id) {
+          this.transports.delete(transport.id);
+        }
+      });
 
-    member.space.members.delete(id);
-    this.members.delete(id);
+      // TODO: These transports will require some cleanup.
+      this.transports.delete(member.producer.id);
+      member.memberToConsumerMap.forEach((transport) => {
+        this.transports.delete(transport.id);
+      });
 
-    ack();
-  };
+      member.space.members.delete(id);
+      this.members.delete(id);
+
+      ack();
+    };
 
   onUnsubscribeFromSpaceRequest: QueueConsumerCallback<"unsubscribeFromSpaceRequest"> =
     ({ uuid }, ack, nack) => {
-    const space = this.spaces.get(uuid);
-    if (space === undefined) {
-      nack(new Error("space not found"));
-      return;
+      const space = this.spaces.get(uuid);
+      if (space === undefined) {
+        nack(new Error("space not found"));
+        return;
+      }
+      if (space.members.size > 0) {
+        nack(new Error("space still not empty"));
+        return;
+      }
+
+      // TODO: Clean up routers associated to the space
+
+      this.spaces.delete(uuid);
+
+      ack();
+    };
+
+  onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
+    ({ id }, ack, nack) => {
+      const transport = this.transports.get(id);
+      if (transport === undefined) {
+        nack(new Error("transport not found"));
+        return;
+      }
+      
+      // TODO: Handle transport updates
+
+      ack();
     }
-    if (space.members.size > 0) {
-      nack(new Error("space still not empty"));
-      return;
-    }
-
-    // TODO: Clean up routers associated to the space
-
-    this.spaces.delete(uuid);
-
-    ack();
-  };
 }

@@ -7,7 +7,7 @@ Implementation of the SFU worker.
 
 */
 
-import { Coordinator } from "./coordinator.ts";
+import { Coordinator, type QueueConsumerCallback } from "./coordinator.ts";
 
 import mediasoup from "mediasoup";
 
@@ -24,15 +24,8 @@ export class SfuWorker {
 
     this.routers = new Map();
 
-    coordinator.consume(
-      "newRouterRequest", async ({ assignedId }, ack, nack) => {
-        try {
-          await this.createRouter(assignedId);
-          ack();
-        } catch (err: any) {
-          nack(err);
-        }
-      });  // No need for cancel callback since only one worker is used currently
+    this.coordinator.consume("newRouterRequest", this.onNewRouterRequest);
+    
   }
 
   static async create(
@@ -49,6 +42,32 @@ export class SfuWorker {
 
     return new SfuWorker(worker, coordinator);
   }
+
+  onNewRouterRequest: QueueConsumerCallback<"newRouterRequest"> =
+    async ({ assignedId }, ack, nack) => {
+      try {
+        await this.createRouter(assignedId);
+        ack();
+      } catch (err: any) {
+        nack(err);
+      }
+    }
+  
+  onNewTransportRequest: QueueConsumerCallback<"newTransportRequest"> =
+    async ({ routerId, consumesFromTransportId }, ack, nack) => {
+      const router = this.routers.get(routerId);
+      if (router === undefined) {
+        nack(new Error("router not found"));
+        return;
+      }
+
+      try {
+        // TODO: Handle creating new transport
+        ack();
+      } catch (err: any) {
+        nack(err);
+      }
+    }
 
   async createRouter(assignedRouterId: number) {
     // TODO: Not sure what the router options should be

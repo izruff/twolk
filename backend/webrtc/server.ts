@@ -9,10 +9,7 @@ horizontally and manage communication between servers.
 
 */
 
-import {
-  Coordinator, SpaceData, MemberData, MemberState, TransportMetadata,
-  type QueuePayloadTypeMap,
-} from "./coordinator.ts";
+import { Coordinator, SpaceData, MemberData, MemberState } from "./coordinator.ts";
 
 import https from "node:https";
 import { Server as BaseServer, Socket as BaseSocket } from "socket.io";
