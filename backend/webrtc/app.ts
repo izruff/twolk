@@ -1,14 +1,14 @@
-import { createWsSignalingServer } from "./server.ts";
+import { SignalingServer } from "./server.ts";
 import { SfuWorker } from "./worker.ts";
 import { Coordinator } from "./coordinator.ts";
 
-import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE } from "./constants.ts";
+import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE } from "./utils/constants.ts";
 
 import fs from "fs";
 
 const coordinator = new Coordinator();
 
-const io = createWsSignalingServer(
+const io = SignalingServer.create(
   {
     key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
     cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),

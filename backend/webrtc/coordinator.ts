@@ -56,8 +56,9 @@ export interface TransportMetadata {
 
 interface Transport {
   id: number;
+  givenId?: string;  // Needs to be present when status is not unallocated
   router: Router;
-  isProducer: boolean;
+  consumesFromTransportId?: number;
   status: TransportStatus;
   metadata?: TransportMetadata;
 }
@@ -73,9 +74,9 @@ export type QueuePayloadTypeMap = {
   newRouterRequest: {
     assignedId: number,
   };
-  newTransportRequest: {
+  newWebRtcTransportRequest: {
     routerId: number,
-    consumesFromTransportId?: number,  // Only for consumer transports
+    isProducer: boolean,
   };
   subscribeToSpaceRequest: {
     uuid: string,
@@ -101,7 +102,9 @@ export type QueuePayloadTypeMap = {
 
 export type QueueResponseTypeMap = {
   newRouterRequest: void;
-  newTransportRequest: void;
+  newWebRtcTransportRequest: {
+    options: mediasoupClient.types.TransportOptions,
+  };
   subscribeToSpaceRequest: {
     data: SpaceData,
   };
@@ -164,7 +167,7 @@ export class Coordinator {
     // TODO: Automate this set instantiations
     this.queueConsumerCallbacks = {
       newRouterRequest: new Set(),
-      newTransportRequest: new Set(),
+      newWebRtcTransportRequest: new Set(),
       subscribeToSpaceRequest: new Set(),
       addMemberRequest: new Set(),
       removeMemberRequest: new Set(),
@@ -192,19 +195,30 @@ export class Coordinator {
     return id;
   }
 
-  _createNewTransport(router: Router, isProducer: boolean): Transport {
+  _createNewTransport(router: Router, consumesFromTransportId?: number) {
     const id = Coordinator._transportIdCounter;
     Coordinator._transportIdCounter = (Coordinator._transportIdCounter + 1) % Coordinator.MAX_COUNTER;
 
-    const transport: Transport = { id, router, isProducer, status: "unallocated" };
+    const transport: Transport = { id, router, consumesFromTransportId, status: "unallocated" };
     this.transports.set(id, transport);
-    this._allocateTransport(transport);
-
     return transport;
   }
 
-  _allocateTransport(transport: Transport) {
-    // TODO
+  async _allocateTransport(transport: Transport) {
+    return new Promise<void>((resolve) => {
+      this.publish("newWebRtcTransportRequest", {
+        routerId: transport.router.id,
+        isProducer: transport.consumesFromTransportId === undefined,
+      }, ({ options }) => {
+        transport.givenId = options.id;
+        transport.metadata = { options };
+        transport.status = "allocated";
+        resolve();
+      }, (e: Error) => {
+        // TODO: Need retry mechanism
+        throw new Error("newWebRtcTransportRequest nacked: " + e.message);
+      });
+    });
   }
 
   // When we scale the workers, we might need this to distribute members across
@@ -269,19 +283,30 @@ export class Coordinator {
       const space = this.spaces.get(spaceUuid)!;
       const router = this._allocateRouter(space);
 
+      const newMemberTransport = this._createNewTransport(router, undefined);
       const newMember: Member = {
         id, space, router, data: memberData, state: memberState,
-        producer: this._createNewTransport(router, true),
+        producer: newMemberTransport,
         memberToConsumerMap: new Map(),
       };
+
+      const otherMemberTransports: Transport[] = [];
       space.members.forEach((other) => {
         if (other.id !== id) {
-          newMember.memberToConsumerMap.set(other.id,
-            this._createNewTransport(router, false));
+          const transport = this._createNewTransport(router, newMemberTransport.id);
+          otherMemberTransports.push(transport);
+          newMember.memberToConsumerMap.set(other.id, transport);
         }
       });
+
       this.members.set(id, newMember);
       space.members.set(id, newMember);
+
+      this._allocateTransport(newMemberTransport).then(() => {
+        const allocateOtherPromises = otherMemberTransports.map((transport) =>
+          this._allocateTransport(transport));
+        return Promise.all(allocateOtherPromises);
+      });
 
       ack({ id });
     };

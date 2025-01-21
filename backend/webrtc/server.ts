@@ -139,7 +139,7 @@ interface Connection {
 }
 
 
-class SignalingServer {
+export class SignalingServer {
   server: Server
   coordinator: Coordinator
 

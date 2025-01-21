@@ -8,15 +8,24 @@ Implementation of the SFU worker.
 */
 
 import { Coordinator, type QueueConsumerCallback } from "./coordinator.ts";
+import { getPublicIpAddress } from "./utils/network.ts";
 
 import mediasoup from "mediasoup";
+
+
+interface Router {
+  id: number;
+  mediasoupRouter: mediasoup.types.Router;
+  webRtcProducerTransports: Map<string, mediasoup.types.WebRtcTransport>;
+  webRtcConsumerTransports: Map<string, mediasoup.types.WebRtcTransport>;
+}
 
 
 export class SfuWorker {
   mediasoupWorker: mediasoup.types.Worker
   coordinator: Coordinator
 
-  routers: Map<number, mediasoup.types.Router>
+  routers: Map<number, Router>
 
   constructor(worker: mediasoup.types.Worker, coordinator: Coordinator) {
     this.mediasoupWorker = worker;
@@ -53,8 +62,8 @@ export class SfuWorker {
       }
     }
   
-  onNewTransportRequest: QueueConsumerCallback<"newTransportRequest"> =
-    async ({ routerId, consumesFromTransportId }, ack, nack) => {
+  onNewWebRtcTransportRequest: QueueConsumerCallback<"newWebRtcTransportRequest"> =
+    async ({ routerId, isProducer }, ack, nack) => {
       const router = this.routers.get(routerId);
       if (router === undefined) {
         nack(new Error("router not found"));
@@ -62,8 +71,39 @@ export class SfuWorker {
       }
 
       try {
-        // TODO: Handle creating new transport
-        ack();
+        // Create the transport
+        const transportOptions: mediasoup.types.WebRtcTransportOptions = {
+          listenIps: [
+            {
+              ip: "0.0.0.0",
+              announcedIp: await getPublicIpAddress(),
+            }
+          ],
+          enableUdp: true,
+          enableTcp: true,
+          preferUdp: true,
+        };
+        const transport = await router.mediasoupRouter.createWebRtcTransport(
+          transportOptions);
+
+        // TODO: Handle events emitted by the transport
+
+        // Register this transport
+        if (isProducer) {
+          router.webRtcProducerTransports.set(transport.id, transport);
+        } else {
+          router.webRtcConsumerTransports.set(transport.id, transport);
+        }
+
+        // Send back the transport parameters
+        ack({
+          options: {
+            id: transport.id,
+            iceParameters: transport.iceParameters,
+            iceCandidates: transport.iceCandidates,
+            dtlsParameters: transport.dtlsParameters,
+          }
+        });
       } catch (err: any) {
         nack(err);
       }
@@ -71,7 +111,13 @@ export class SfuWorker {
 
   async createRouter(assignedRouterId: number) {
     // TODO: Not sure what the router options should be
-    const router = await this.mediasoupWorker.createRouter();
+    const mediasoupRouter = await this.mediasoupWorker.createRouter();
+    const router: Router = {
+      id: assignedRouterId,
+      mediasoupRouter,
+      webRtcProducerTransports: new Map(),
+      webRtcConsumerTransports: new Map(),
+    };
     this.routers.set(assignedRouterId, router);
   }
 }
