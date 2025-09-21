@@ -7,10 +7,15 @@ Implementation for the WebSocket signaling server.
 In the future, there should be another service to allow scaling these
 horizontally and manage communication between servers.
 
+Small note: A lot of these functions are not too complicated due to the
+fact that TypeScript runs on single-threaded event loop, so we don't have
+to worry about race conditions and order of operations too much.
+
 */
 
 import {
-  Coordinator, SpaceData, MemberData, MemberState, QueueConsumerCallback
+  Coordinator, SpaceData, MemberData, MemberState, QueueConsumerCallback,
+  type SpaceUpdateSTypes,
 } from "./coordinator.ts";
 
 import https from "node:https";
@@ -32,13 +37,15 @@ interface Space {
   members: Map<number, Member>;
 }
 
+type ClientSideMember = Omit<Member, "space">;
+
 
 type MemberEventType = "spaceInit" | "transportParams";
 
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
     data: SpaceData,
-    members: Map<number, Member>,
+    members: Map<number, ClientSideMember>,
   };
   transportParams: {
     memberId: number,
@@ -51,7 +58,7 @@ type SpaceWideEventType = "memberJoin" | "memberLeave" | "memberStateUpdate"
 
 interface SpaceWideEventContentMap extends Record<SpaceWideEventType, any> {
   memberJoin: {
-    member: Member,
+    member: ClientSideMember,
   };
   memberLeave: {
     memberId: number,
@@ -90,38 +97,35 @@ interface ClientToServerEvents {
   // `prepareMember` but this one is for client-side checks/retries
   createWebRtcTransport: (
     args: { asProducer: boolean },
-    callback: (options: mediasoupClient.types.TransportOptions) => void,
   ) => Promise<void>;
 
-  transportConnect: (
+  transportProducerConnect: (
     args: { dtlsParameters: mediasoup.types.DtlsParameters },
-  ) => void;
+  ) => Promise<void>;
 
-  transportProduce: (
+  transportProducerProduce: (
     args: {
       kind: mediasoup.types.MediaKind,
       rtpParameters: mediasoup.types.RtpParameters,
     },
-    callback: (id: string) => void,
-  ) => void;
+  ) => Promise<void>;
 
-  transportRecvConnect: (
+  transportConsumerConnect: (
     args: {
       dtlsParameters: mediasoup.types.DtlsParameters,
       sourceMemberId: number,
     },
   ) => Promise<void>;
 
-  consume: (
+  transportConsumerConsume: (
     args: {
       rtpCapabilities: mediasoup.types.RtpCapabilities,
       sourceMemberId: number,
     },
-    callback: (options: mediasoupClient.types.ConsumerOptions) => void,
   ) => Promise<void>;
 
-  consumerResume: (
-    args: { producerId: number },
+  transportConsumerResume: (
+    args: { sourceMemberId: number },
   ) => Promise<void>;
 
 }
@@ -146,6 +150,25 @@ type Socket = BaseSocket<ClientToServerEvents, ServerToClientEvents>;
 interface Connection {
   socket: Socket;
   memberId?: number;
+}
+
+
+const FORWARD_ONLY_CLIENT_TO_SERVER_EVENTS_MAP: Map<keyof ClientToServerEvents,
+  SpaceUpdateSTypes> = new Map([
+    ["transportProducerConnect", "S:memberProducerConnectEvent"],
+    ["transportProducerProduce", "S:memberProducerProduceEvent"],
+    ["transportConsumerConnect", "S:memberConsumerConnectEvent"],
+    ["transportConsumerConsume", "S:memberConsumerConsumeEvent"],
+    ["transportConsumerResume", "S:memberConsumerResumeEvent"],
+  ]);
+
+
+function getClientSideMember(member: Member): ClientSideMember {
+  return {
+    id: member.id,
+    data: member.data,
+    state: member.state,
+  };
 }
 
 
@@ -196,6 +219,7 @@ export class SignalingServer {
       this.connections.delete(socket.id);
     })
 
+    // Prepare space and member
     const spaceUuid = socket.data.spaceUuid;
     const socketId = socket.id;
     try {
@@ -204,18 +228,50 @@ export class SignalingServer {
 
       const memberId = await this.prepareMember(spaceUuid, socketId,
         socket.data.memberData, {
+          isMuted: false,
           transportIsConnected: false,
         });
 
-      const space = this.spaces.get(socket.id)!;
+      const space = this.spaces.get(spaceUuid)!;
+
+      // Start listening to WebSocket messages
+
+      socket.on("createWebRtcTransport", async ({ asProducer }) => {
+        // TODO: Implement this; we need the coordinator server to listen to
+        // a new type of space update.
+      })
+
+      // For all these message types, the signaling server simply forwards it
+      // to the coordinator.
+      FORWARD_ONLY_CLIENT_TO_SERVER_EVENTS_MAP.forEach((spaceUpdateType,
+        clientEventType) => {
+          // TODO: We probably should change the way we implement typing here
+          // @ts-ignore ('data' implicitly has 'any' type)
+          socket.on(clientEventType, async (data) => {
+            this.coordinator.publish("spaceUpdateStream", {
+              uuid: spaceUuid,
+              type: spaceUpdateType,
+              payload: { memberId, data },
+            }, () => {
+              // Do nothing for now
+            }, (e: Error) => {
+              // TODO: Need retry mechanism, then notify client on failure
+              throw new Error("failed to forward event: " + e.message);
+            });
+          });
+        });
+
+      // This message also serves as confirmation that the client can start
+      // sending messages back to the server.
       socket.emit("memberEvent", "spaceInit", {
         data: space.data,
         members: space.members,
       });
       this.connections.get(socketId)!.memberId = memberId;
-      // It is important to set this below here because this map will be used 
-      // to broadcast updates, and we want to make sure no updates were missed
-      // after the memberEvent emission.
+
+      // This map will be used to broadcast updates, and this insertion needs
+      // to be performed with the memberEvent emission atomically; we want to
+      // make sure no updates are missed.
       this.memberIdToSocket.set(memberId, socket);
     } catch (err: any) {
       console.log(err);
@@ -271,6 +327,14 @@ export class SignalingServer {
             };
             this.members.set(id, member);
             this.spaces.get(spaceUuid)!.members.set(id, member);
+
+            // Notify other members in the space
+            space.members.forEach((_, otherId) => {
+              if (otherId !== id) {
+                this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
+                  "memberJoin", getClientSideMember(member));
+              }
+            });
           }
         }
         resolve(id);
@@ -290,6 +354,7 @@ export class SignalingServer {
     }
     member.state = { ...member.state, ...update };
 
+    // Notify other members in the space
     this.members.get(memberId)!.space.members.forEach((_, id) => {
       this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
         memberId, newState: member.state
@@ -306,11 +371,18 @@ export class SignalingServer {
       this.coordinator.publish("removeMemberRequest", { id: memberId },
         () => {
           if (this.members.has(memberId)) {
-            this.members.get(memberId)!.space.members.delete(memberId);
+            const space = this.members.get(memberId)!.space;
+            space.members.delete(memberId);
             this.members.delete(memberId);
-          }
 
-          // TODO: Notify other members in the space
+            // Notify other members in the space
+            space.members.forEach((_, otherId) => {
+              if (otherId !== memberId) {
+                this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
+                  "memberLeave", memberId);
+              }
+            });
+          }
 
           resolve();
         },

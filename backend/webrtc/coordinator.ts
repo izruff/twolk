@@ -8,6 +8,10 @@ In the future, it should also handle scaling the SFU workers horizontally,
 managing load distribution and RTP packet transfer between two workers, and
 implementing router migration policies from one worker to another.
 
+Small note: A lot of these functions are not too complicated due to the
+fact that TypeScript runs on single-threaded event loop, so we don't have
+to worry about race conditions and order of operations too much.
+
 */
 
 import mediasoup from "mediasoup";
@@ -30,7 +34,10 @@ export interface MemberData {
 }
 
 export interface MemberState {
-  // TODO: isMuted, etc.
+  // Maintained by both backend and client
+  isMuted: boolean;
+
+  // Maintained by backend only
   transportIsConnected: boolean;
 }
 
