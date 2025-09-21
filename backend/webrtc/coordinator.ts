@@ -31,6 +31,7 @@ export interface MemberData {
 
 export interface MemberState {
   // TODO: isMuted, etc.
+  transportIsConnected: boolean;
 }
 
 interface Member {
@@ -56,7 +57,6 @@ export interface TransportMetadata {
 
 interface Transport {
   id: number;
-  givenId?: string;  // Needs to be present when status is not unallocated
   router: Router;
   consumesFromTransportId?: number;
   status: TransportStatus;
@@ -76,6 +76,7 @@ export type QueuePayloadTypeMap = {
   };
   newWebRtcTransportRequest: {
     routerId: number,
+    assignedId: number,
     isProducer: boolean,
   };
   subscribeToSpaceRequest: {
@@ -92,12 +93,12 @@ export type QueuePayloadTypeMap = {
   unsubscribeFromSpaceRequest: {
     uuid: string,
   };
-  spaceUpdateStream: {
-    uuid: string,
-  };
-  transportUpdateStream: {
-    id: number,
-  };
+  spaceUpdateStream: { uuid: string } & {
+    [K in SpaceUpdateTypes]: { type: K; payload: SpaceUpdatePayloadTypeMap[K] }
+  }[SpaceUpdateTypes];
+  transportUpdateStream: { id: number } & {
+    [K in TransportUpdateTypes]: { type: K; payload: TransportUpdatePayloadTypeMap[K] }
+  }[TransportUpdateTypes];
 }
 
 export type QueueResponseTypeMap = {
@@ -127,6 +128,109 @@ export type QueueConsumerCallback<K extends QueueTypes> = (
 type QueueConsumerCallbackCollection = {
   [K in QueueTypes]: Set<QueueConsumerCallback<K>>;
 };
+
+
+// Space update stream messages
+// Types that start with 'S' come from the signaling server to the coordinator
+// Types that start with 'C' come from the coordinator to the signaling server
+
+export type SpaceUpdateSPayloadTypeMap = {
+  // Sent on an attempt to initiate producer transport connection
+  "S:memberProducerConnectEvent": {
+    memberId: number,
+    data: {
+      dtlsParameters: mediasoup.types.DtlsParameters,
+    },
+  };
+  // Sent on an attempt to start producing media
+  "S:memberProducerProduceEvent": {
+    memberId: number,
+    data: {
+      kind: mediasoup.types.MediaKind,
+      rtpParameters: mediasoup.types.RtpParameters,
+    },
+  };
+  // Sent on an attempt to initiate consumer transport connection
+  "S:memberConsumerConnectEvent": {
+    memberId: number,
+    data: {
+      dtlsParameters: mediasoup.types.DtlsParameters,
+      sourceMemberId: number,
+    },
+  };
+  // Sent on an attempt to start consuming media
+  "S:memberConsumerConsumeEvent": {
+    memberId: number,
+    data: {
+      rtpCapabilities: mediasoup.types.RtpCapabilities,
+      sourceMemberId: number,
+    },
+  };
+  // Sent to resume a consumer that is consuming media
+  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+  "S:memberConsumerResumeEvent": {
+    memberId: number,
+    data: {
+      sourceMemberId: number,
+    },
+  };
+};
+
+export type SpaceUpdateCPayloadTypeMap = {
+  // Sent to provide transport parameters to client
+  "C:transportParamsEvent": {
+    memberId: number,
+    options: mediasoupClient.types.TransportOptions,
+  };
+  // Sent to notify that a producer has successfully connected and
+  // other members can start consuming.
+  "C:producerConnectedEvent": {
+    memberId: number,
+  };
+};
+
+export type SpaceUpdatePayloadTypeMap =
+  SpaceUpdateSPayloadTypeMap & SpaceUpdateCPayloadTypeMap;
+
+export type SpaceUpdateSTypes = keyof SpaceUpdateSPayloadTypeMap;
+export type SpaceUpdateCTypes = keyof SpaceUpdateCPayloadTypeMap;
+export type SpaceUpdateTypes = keyof SpaceUpdatePayloadTypeMap;
+
+
+// Transport update stream messages
+// Types that start with 'W' come from the SFU worker to the coordinator
+// Types that start with 'C' come from the coordinator to the SFU worker
+
+export type TransportUpdateWPayloadTypeMap = {
+  // Currently no messages from worker to coordinator
+};
+
+export type TransportUpdateCPayloadTypeMap = {
+  // Sent on an attempt to connect a producer/consumer transport to client 
+  "C:transportConnectEvent": {
+    dtlsParameters: mediasoup.types.DtlsParameters,
+  };
+  // Sent on an attempt to start producing media
+  "C:transportProducerProduceEvent": {
+    kind: mediasoup.types.MediaKind,
+    rtpParameters: mediasoup.types.RtpParameters,
+  };
+  // Sent on an attempt to start consuming media
+  "C:transportConsumerConsumeEvent": {
+    rtpCapabilities: mediasoup.types.RtpCapabilities,
+    producingTransportId: number,
+  };
+  // Sent to resume a consumer that is consuming media
+  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+  "C:transportConsumerResumeEvent": {};
+};
+
+export type TransportUpdatePayloadTypeMap =
+  TransportUpdateWPayloadTypeMap & TransportUpdateCPayloadTypeMap;
+
+export type TransportUpdateWTypes = keyof TransportUpdateWPayloadTypeMap;
+export type TransportUpdateCTypes = keyof TransportUpdateCPayloadTypeMap;
+export type TransportUpdateTypes = keyof TransportUpdatePayloadTypeMap;
 
 
 export class Coordinator {
@@ -180,6 +284,7 @@ export class Coordinator {
     this.consume("addMemberRequest", this.onAddMemberRequest);
     this.consume("removeMemberRequest", this.onRemoveMemberRequest);
     this.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest);
+    this.consume("spaceUpdateStream", this.onSpaceUpdate);
     this.consume("transportUpdateStream", this.onTransportUpdate);
   }
 
@@ -208,12 +313,26 @@ export class Coordinator {
     return new Promise<void>((resolve) => {
       this.publish("newWebRtcTransportRequest", {
         routerId: transport.router.id,
+        assignedId: transport.id,
         isProducer: transport.consumesFromTransportId === undefined,
       }, ({ options }) => {
-        transport.givenId = options.id;
         transport.metadata = { options };
         transport.status = "allocated";
-        resolve();
+
+        this.publish("spaceUpdateStream", {
+          uuid: transport.router.space.uuid,
+          type: "C:transportParamsEvent",
+          payload: {
+            memberId: transport.router.space.primaryRouter.id,
+            options: transport.metadata.options,
+          },
+        }, () => {
+          resolve();
+        }, (e: Error) => {
+          // Since this event is just a notification, we resolve anyway.
+          // TODO: Client should handle retry (implement in signaling server).
+          resolve();
+        });
       }, (e: Error) => {
         // TODO: Need retry mechanism
         throw new Error("newWebRtcTransportRequest nacked: " + e.message);
@@ -228,10 +347,9 @@ export class Coordinator {
     return space.primaryRouter;
   }
 
-  // This is supposed to come from a message broker client class, but here we
-  // assume this function acts like it consumes from a message queue. Also,
-  // we don't implement tags here; for simplicity we just include tags in the
-  // message content if needed.
+  // Attaches a callback to consume messages from a queue, i.e. subscribes to the
+  // queue. In gRPC terms, this is basically listening to a bidirectional stream,
+  // and ack() or nack() are used to send responses.
   consume<K extends QueueTypes>(
     queueName: K, callback: QueueConsumerCallback<K>
   ): (() => void) {
@@ -244,12 +362,9 @@ export class Coordinator {
     return cancelCallback;
   }
 
-  // Again, this function acts like it publishes to a message queue. Think of
-  // the ack() and nack() functions as a message to a reply-to queue, used for
-  // acknowledging the message and notifying the publisher if it was successful
-  // or not.
-  // TODO: We are under the assumption that there is only one consumer per
-  // queue, which allows for ack() to take no parameters.
+  // Publishes to a queue. In gRPC terms, this is basically sending messages to a
+  // bidirectional stream, and listening for responses via the provided onAck()
+  // and onNack() callbacks.
   publish<K extends QueueTypes>(
     queueName: K, payload: QueuePayloadTypeMap[K],
     onAck: (resp: QueueResponseTypeMap[K]) => void,
@@ -302,6 +417,8 @@ export class Coordinator {
       this.members.set(id, newMember);
       space.members.set(id, newMember);
 
+      // Allocate transports asynchronously
+      // TODO: Handle errors; we can just let the client retry.
       this._allocateTransport(newMemberTransport).then(() => {
         const allocateOtherPromises = otherMemberTransports.map((transport) =>
           this._allocateTransport(transport));
@@ -356,16 +473,205 @@ export class Coordinator {
       ack();
     };
 
+  onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
+    ({ uuid, type, payload }, ack, nack) => {
+      const space = this.spaces.get(uuid);
+      if (space === undefined) {
+        nack(new Error("space not found"));
+        return;
+      }
+
+      if (type === "S:memberProducerConnectEvent") {
+        const member = space.members.get(payload.memberId);
+        if (member === undefined) {
+          nack(new Error("member not found"));
+          return;
+        }
+
+        const transport = member.producer;
+        if (transport.status == "unallocated") {
+          nack(new Error("transport not allocated"));
+          return;
+        }
+
+        // Notify SFU worker to initiate transport connection
+        if (transport.status !== "connected") {
+          this.publish("transportUpdateStream", {
+            id: transport.id,
+            type: "C:transportConnectEvent",
+            payload: {
+              dtlsParameters: payload.data.dtlsParameters,
+            },
+          }, () => {
+            transport.status = "connected";
+            ack();
+          }, (e: Error) => {
+            // TODO: Need retry mechanism
+            nack(new Error(
+              "transportUpdate for C:transportConnectEvent nacked: " +
+              e.message));
+          });
+        }
+
+      } else if (type === "S:memberProducerProduceEvent") {
+        const member = space.members.get(payload.memberId);
+        if (member === undefined) {
+          nack(new Error("member not found"));
+          return;
+        }
+
+        const transport = member.producer;
+        if (transport.status != "connected") {
+          nack(new Error("transport not connected"));
+          return;
+        }
+
+        // Notify SFU worker to start producing
+        this.publish("transportUpdateStream", {
+          id: transport.id,
+          type: "C:transportProducerProduceEvent",
+          payload: {
+            kind: payload.data.kind,
+            rtpParameters: payload.data.rtpParameters,
+          },
+        }, () => {
+          ack();
+          // Notify the space members about the new producer
+          this.publish("spaceUpdateStream", {
+            uuid,
+            type: "C:producerConnectedEvent",
+            payload: {
+              memberId: payload.memberId,
+            },
+          }, () => {
+            // Do nothing for now
+          }, (e: Error) => {
+            // Since this event is just a notification, we do nothing.
+            // Client should treat this as a best-effort notification.
+          })
+        }, (e: Error) => {
+          // TODO: Need retry mechanism
+          nack(new Error(
+            "transportUpdate for C:transportProducerProduceEvent nacked: " +
+            e.message));
+        });
+
+      } else if (type === "S:memberConsumerConnectEvent") {
+        const member = space.members.get(payload.memberId);
+        if (member === undefined) {
+          nack(new Error("member not found"));
+          return;
+        }
+
+        const transport = member.memberToConsumerMap.get(
+          payload.data.sourceMemberId);
+        if (transport === undefined || transport.status == "unallocated") {
+          nack(new Error("transport not allocated"));
+          return;
+        }
+
+        // Notify SFU worker to initiate transport connection
+        if (transport.status !== "connected") {
+          this.publish("transportUpdateStream", {
+            id: transport.id,
+            type: "C:transportConnectEvent",
+            payload: {
+              dtlsParameters: payload.data.dtlsParameters,
+            },
+          }, () => {
+            transport.status = "connected";
+            ack();
+          }, (e: Error) => {
+            // TODO: Need retry mechanism
+            nack(new Error(
+              "transportUpdate for C:transportConnectEvent nacked: " +
+              e.message));
+          });
+        }
+
+      } else if (type === "S:memberConsumerConsumeEvent") {
+        const member = space.members.get(payload.memberId);
+        if (member === undefined) {
+          nack(new Error("member not found"));
+          return;
+        }
+
+        const sourceMember = space.members.get(payload.data.sourceMemberId);
+        if (sourceMember === undefined) {
+          nack(new Error("source member not found"));
+          return;
+        }
+
+        const transport = member.memberToConsumerMap.get(
+          payload.data.sourceMemberId);
+        if (transport === undefined || transport.status !== "connected") {
+          nack(new Error("transport not connected"));
+          return;
+        }
+
+        // Notify SFU worker to start consuming
+        this.publish("transportUpdateStream", {
+          id: transport.id,
+          type: "C:transportConsumerConsumeEvent",
+          payload: {
+            rtpCapabilities: payload.data.rtpCapabilities,
+            producingTransportId: sourceMember.producer.id,
+          },
+        }, () => {
+          ack();
+        }, (e: Error) => {
+          // TODO: Need retry mechanism
+          nack(new Error(
+            "transportUpdate for C:transportConsumerConsumeEvent nacked: " +
+            e.message));
+        });
+
+      } else if (type === "S:memberConsumerResumeEvent") {
+        const member = space.members.get(payload.memberId);
+        if (member === undefined) {
+          nack(new Error("member not found"));
+          return;
+        }
+
+        const transport = member.memberToConsumerMap.get(
+          payload.data.sourceMemberId);
+        if (transport === undefined || transport.status !== "connected") {
+          nack(new Error("transport not connected"));
+          return;
+        }
+
+        // Notify SFU worker to resume consuming
+        // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+        this.publish("transportUpdateStream", {
+          id: transport.id,
+          type: "C:transportConsumerResumeEvent",
+          payload: {},
+        }, () => {
+          ack();
+        }, (e: Error) => {
+          // TODO: Need retry mechanism
+          nack(new Error(
+            "transportUpdate for C:transportConsumerResumeEvent nacked: " +
+            e.message));
+        });
+
+      } else {
+        nack(new Error("unexpected error: unknown space update type"));
+      }
+    }
+
   onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
-    ({ id }, ack, nack) => {
+    ({ id, type, payload }, ack, nack) => {
       const transport = this.transports.get(id);
       if (transport === undefined) {
         nack(new Error("transport not found"));
         return;
       }
-      
-      // TODO: Handle transport updates
 
-      ack();
+      if (false) {
+        // Currently no transport updates to handle
+      } else {
+        nack(new Error("unexpected error: unknown transport update type"));
+      }
     }
 }

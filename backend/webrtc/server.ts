@@ -9,7 +9,9 @@ horizontally and manage communication between servers.
 
 */
 
-import { Coordinator, SpaceData, MemberData, MemberState } from "./coordinator.ts";
+import {
+  Coordinator, SpaceData, MemberData, MemberState, QueueConsumerCallback
+} from "./coordinator.ts";
 
 import https from "node:https";
 import { Server as BaseServer, Socket as BaseSocket } from "socket.io";
@@ -31,12 +33,16 @@ interface Space {
 }
 
 
-type MemberEventType = "spaceInit";
+type MemberEventType = "spaceInit" | "transportParams";
 
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
     data: SpaceData,
     members: Map<number, Member>,
+  };
+  transportParams: {
+    memberId: number,
+    options: mediasoupClient.types.TransportOptions,
   };
 }
 
@@ -80,6 +86,8 @@ interface ClientToServerEvents {
 
   disconnect: () => void;
 
+  // TODO: Implement this; the transport is already created when calling
+  // `prepareMember` but this one is for client-side checks/retries
   createWebRtcTransport: (
     args: { asProducer: boolean },
     callback: (options: mediasoupClient.types.TransportOptions) => void,
@@ -93,19 +101,21 @@ interface ClientToServerEvents {
     args: {
       kind: mediasoup.types.MediaKind,
       rtpParameters: mediasoup.types.RtpParameters,
-      appData: mediasoup.types.AppData,
     },
     callback: (id: string) => void,
   ) => void;
 
   transportRecvConnect: (
-    args: { dtlsParameters: mediasoup.types.DtlsParameters },
+    args: {
+      dtlsParameters: mediasoup.types.DtlsParameters,
+      sourceMemberId: number,
+    },
   ) => Promise<void>;
 
   consume: (
     args: {
       rtpCapabilities: mediasoup.types.RtpCapabilities,
-      producerId: number,
+      sourceMemberId: number,
     },
     callback: (options: mediasoupClient.types.ConsumerOptions) => void,
   ) => Promise<void>;
@@ -160,6 +170,8 @@ export class SignalingServer {
     this.members = new Map();
 
     this.server.on("connection", this.onConnection);
+
+    this.coordinator.consume("spaceUpdateStream", this.onSpaceUpdate);
   }
 
   static create(httpsOptions: https.ServerOptions, port: number,
@@ -191,7 +203,9 @@ export class SignalingServer {
       socket.emit("connectionSuccessful");
 
       const memberId = await this.prepareMember(spaceUuid, socketId,
-        socket.data.memberData, {});
+        socket.data.memberData, {
+          transportIsConnected: false,
+        });
 
       const space = this.spaces.get(socket.id)!;
       socket.emit("memberEvent", "spaceInit", {
@@ -334,4 +348,45 @@ export class SignalingServer {
 
     return promise;
   }
+
+  onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
+    ({ uuid, type, payload }, ack, nack) => {
+      const space = this.spaces.get(uuid);
+      if (space === undefined) {
+        nack(new Error("space not found"));
+        return;
+      }
+
+      if (type === "C:transportParamsEvent") {
+        const socket = this.memberIdToSocket.get(payload.memberId);
+        if (socket === undefined) {
+          nack(new Error("socket not found"));
+          return;
+        }
+
+        // Pass the transport parameters to the client
+        socket.emit("memberEvent", "transportParams", {
+          memberId: payload.memberId,
+          options: payload.options,
+        });
+
+        ack();
+      } else if (type === "C:producerConnectedEvent") {
+        try {
+          // Notify all other members that they can start consuming
+          space.members.forEach((_, id) => {
+            if (id !== payload.memberId) {
+              this.updateMember(id, { transportIsConnected: true });
+            }
+          });
+        } catch (err: any) {
+          nack(err);
+          return;
+        }
+
+        ack();
+      } else {
+        nack(new Error("unexpected error: unknown space update payload type"));
+      }
+    }
 }

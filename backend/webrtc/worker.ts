@@ -16,9 +16,19 @@ import mediasoup from "mediasoup";
 interface Router {
   id: number;
   mediasoupRouter: mediasoup.types.Router;
-  webRtcProducerTransports: Map<string, mediasoup.types.WebRtcTransport>;
-  webRtcConsumerTransports: Map<string, mediasoup.types.WebRtcTransport>;
+  webRtcProducerTransports: Map<number, WebRtcTransport>;
+  webRtcConsumerTransports: Map<number, WebRtcTransport>;
+  webRtcProducers: Map<number, mediasoup.types.Producer>;
+  webRtcConsumers: Map<number, mediasoup.types.Consumer>;
 }
+
+interface Transport<T extends mediasoup.types.Transport> {
+  id: number;
+  mediasoupTransport: T;
+  router: Router;
+}
+
+type WebRtcTransport = Transport<mediasoup.types.WebRtcTransport>;
 
 
 export class SfuWorker {
@@ -26,12 +36,14 @@ export class SfuWorker {
   coordinator: Coordinator
 
   routers: Map<number, Router>
+  transports: Map<number, Transport<mediasoup.types.Transport>>
 
   constructor(worker: mediasoup.types.Worker, coordinator: Coordinator) {
     this.mediasoupWorker = worker;
     this.coordinator = coordinator;
 
     this.routers = new Map();
+    this.transports = new Map();
 
     this.coordinator.consume("newRouterRequest", this.onNewRouterRequest);
     
@@ -63,7 +75,7 @@ export class SfuWorker {
     }
   
   onNewWebRtcTransportRequest: QueueConsumerCallback<"newWebRtcTransportRequest"> =
-    async ({ routerId, isProducer }, ack, nack) => {
+    async ({ routerId, assignedId, isProducer }, ack, nack) => {
       const router = this.routers.get(routerId);
       if (router === undefined) {
         nack(new Error("router not found"));
@@ -83,29 +95,94 @@ export class SfuWorker {
           enableTcp: true,
           preferUdp: true,
         };
-        const transport = await router.mediasoupRouter.createWebRtcTransport(
+        const mediasoupTransport = await router.mediasoupRouter.createWebRtcTransport(
           transportOptions);
 
         // TODO: Handle events emitted by the transport
 
         // Register this transport
+        const transport: WebRtcTransport = {
+          id: assignedId, mediasoupTransport, router
+        };
+        this.transports.set(assignedId, transport);
         if (isProducer) {
-          router.webRtcProducerTransports.set(transport.id, transport);
+          router.webRtcProducerTransports.set(assignedId, transport);
         } else {
-          router.webRtcConsumerTransports.set(transport.id, transport);
+          router.webRtcConsumerTransports.set(assignedId, transport);
         }
 
         // Send back the transport parameters
         ack({
           options: {
-            id: transport.id,
-            iceParameters: transport.iceParameters,
-            iceCandidates: transport.iceCandidates,
-            dtlsParameters: transport.dtlsParameters,
+            id: mediasoupTransport.id,
+            iceParameters: mediasoupTransport.iceParameters,
+            iceCandidates: mediasoupTransport.iceCandidates,
+            dtlsParameters: mediasoupTransport.dtlsParameters,
           }
         });
       } catch (err: any) {
         nack(err);
+      }
+    }
+
+  onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
+    ({ id, type, payload }, ack, nack) => {
+      const transport = this.transports.get(id);
+      if (transport === undefined) {
+        nack(new Error("transport not found"));
+        return;
+      }
+      
+      if (type === "C:transportConnectEvent") {
+        const { dtlsParameters } = payload;
+        transport.mediasoupTransport.connect({ dtlsParameters })
+          .then(() => ack())
+          .catch((err) => nack(err));
+
+      } else if (type === "C:transportProducerProduceEvent") {
+        const { kind, rtpParameters } = payload;
+        transport.mediasoupTransport.produce({ kind, rtpParameters })
+          .then((producer) => {
+            transport.router.webRtcProducers.set(id, producer);
+            // TODO: Handle events like "transportclose"
+            ack();
+          })
+          .catch((err) => nack(err));
+
+      } else if (type === "C:transportConsumerConsumeEvent") {
+        const { rtpCapabilities, producingTransportId } = payload;
+        const producingTransport = this.transports.get(producingTransportId);
+        if (producingTransport === undefined) {
+          nack(new Error("producing transport not found"));
+          return;
+        }
+
+        transport.mediasoupTransport.consume({
+          producerId: producingTransport.mediasoupTransport.id,
+          rtpCapabilities,
+          // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+          paused: true,
+        })
+          .then((consumer) => {
+            transport.router.webRtcConsumers.set(id, consumer);
+            // TODO: Handle events like "transportclose" and "producerclose"
+            ack();
+          })
+          .catch((err) => nack(err));
+
+      } else if (type === "C:transportConsumerResumeEvent") {
+        const consumer = transport.router.webRtcConsumers.get(id);
+        if (consumer === undefined) {
+          nack(new Error("consumer not found"));
+          return;
+        }
+
+        consumer.resume()
+          .then(() => ack())
+          .catch((err) => nack(err));
+
+      } else {
+        nack(new Error("unexpected error: unknown transport update type"));
       }
     }
 
@@ -117,6 +194,8 @@ export class SfuWorker {
       mediasoupRouter,
       webRtcProducerTransports: new Map(),
       webRtcConsumerTransports: new Map(),
+      webRtcProducers: new Map(),
+      webRtcConsumers: new Map(),
     };
     this.routers.set(assignedRouterId, router);
   }
