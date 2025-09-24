@@ -15,7 +15,7 @@ to worry about race conditions and order of operations too much.
 
 import {
   Coordinator, SpaceData, MemberData, MemberState, QueueConsumerCallback,
-  type SpaceUpdateSTypes,
+  type SpaceUpdateSTypes, type ClientSideSpace, type ClientSideMember
 } from "./coordinator.ts";
 
 import https from "node:https";
@@ -26,7 +26,8 @@ import mediasoupClient from "mediasoup-client";
 
 interface Member {
   id: number;
-  space: Space;
+  owningSpace: Space;
+  
   data: MemberData;
   state: MemberState;
 }
@@ -36,9 +37,6 @@ interface Space {
   data: SpaceData;
   members: Map<number, Member>;
 }
-
-type ClientSideMember = Omit<Member, "space">;
-
 
 type MemberEventType = "spaceInit" | "transportParams";
 
@@ -163,6 +161,17 @@ const FORWARD_ONLY_CLIENT_TO_SERVER_EVENTS_MAP: Map<keyof ClientToServerEvents,
   ]);
 
 
+function getClientSideSpace(space: Space): ClientSideSpace {
+  const clientSideMembers = new Map<number, ClientSideMember>(
+    Array.from(space.members.values()).map(
+      (member) => [member.id, getClientSideMember(member)]));
+  return {
+    uuid: space.uuid,
+    data: space.data,
+    members: clientSideMembers,
+  };
+}
+
 function getClientSideMember(member: Member): ClientSideMember {
   return {
     id: member.id,
@@ -207,11 +216,39 @@ export class SignalingServer {
     return new SignalingServer(server, coordinator);
   }
 
+  _addSpace(uuid: string, data: SpaceData): Space {
+    const space: Space = { uuid, data, members: new Map() };
+    this.spaces.set(uuid, space);
+    return space;
+  }
+
+  _removeSpace(uuid: string) {
+    this.spaces.delete(uuid);
+  }
+
+  _addMember(id: number, space: Space, data: MemberData,
+    initialState: MemberState): Member {
+    const member: Member = {
+      id, owningSpace: space, data, state: initialState
+    };
+    this.members.set(id, member);
+    space.members.set(id, member);
+    return member;
+  }
+
+  _removeMember(id: number) {
+    const member = this.members.get(id);
+    if (member !== undefined) {
+      member.owningSpace.members.delete(id);
+      this.members.delete(id);
+    }
+  }
+
   async onConnection(socket: Socket) {
     this.connections.set(socket.id, { socket });
 
     socket.on("disconnect", () => {
-      const memberId = this.connections.get(socket.id)?.memberId;
+      const memberId = this.connections.get(socket.id)!.memberId;
       if (memberId !== undefined) {
         this.memberIdToSocket.delete(memberId);
         this.deleteMember(memberId);
@@ -286,9 +323,17 @@ export class SignalingServer {
 
     const promise = new Promise<void>((resolve) => {
       this.coordinator.publish("subscribeToSpaceRequest", { uuid },
-        ({ data }) => {
+        ({ clientSideSpace }) => {
           if (!this.spaces.has(uuid)) {
-            this.spaces.set(uuid, { uuid, data, members: new Map() });
+            // Create the space and existing members object
+            const space = this._addSpace(uuid, clientSideSpace.data);
+            clientSideSpace.members.forEach(({ id, data, state }) => {
+              this._addMember(id, space, data, state);
+            });
+          } else {
+            // This should not happen since subscribeToSpaceRequest is only sent
+            // once, although this might change in the future.
+            console.log("warning: spaceUuid already exists when calling prepareSpace");
           }
           resolve();
         },
@@ -322,20 +367,25 @@ export class SignalingServer {
             // This might happen if the space is already closed and the member
             // came in late, but I'm not too sure.
           } else {
-            const member: Member = {
-              id, space, data: memberData, state: memberState
-            };
-            this.members.set(id, member);
-            this.spaces.get(spaceUuid)!.members.set(id, member);
+            const member = this._addMember(id, space, memberData, memberState);
 
-            // Notify other members in the space
+            // Notify other members in the space (whose sockets we own)
+            // This new member will not receive this and instead will get the
+            // spaceInit member event.
             space.members.forEach((_, otherId) => {
-              if (otherId !== id) {
+              if (otherId !== id && this.memberIdToSocket.has(otherId)) {
                 this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
                   "memberJoin", getClientSideMember(member));
               }
             });
+
+            // TODO: Forward the notification to other servers via coordinator
+            // (this will be implemented later).
           }
+        } else {
+          // This should not happen since addMemberRequest is only sent once,
+          // although this might change in the future.
+          console.log("warning: memberId already exists when calling prepareMember");
         }
         resolve(id);
       }, (e: Error) => {
@@ -354,12 +404,17 @@ export class SignalingServer {
     }
     member.state = { ...member.state, ...update };
 
-    // Notify other members in the space
-    this.members.get(memberId)!.space.members.forEach((_, id) => {
-      this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
-        memberId, newState: member.state
-      });
+    // Notify all members in the space (whose sockets we own)
+    member.owningSpace.members.forEach((_, id) => {
+      if (this.memberIdToSocket.has(id)) {
+        this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
+          memberId, newState: member.state
+        });
+      }
     });
+
+    // TODO: Forward the notification to other servers via coordinator
+    // (this will be implemented later).
   }
 
   async deleteMember(memberId: number): Promise<void> {
@@ -371,17 +426,24 @@ export class SignalingServer {
       this.coordinator.publish("removeMemberRequest", { id: memberId },
         () => {
           if (this.members.has(memberId)) {
-            const space = this.members.get(memberId)!.space;
-            space.members.delete(memberId);
-            this.members.delete(memberId);
+            const space = this.members.get(memberId)!.owningSpace;
+            this._removeMember(memberId);
 
-            // Notify other members in the space
+            // Notify other members in the space (whose sockets we own)
+            // This member will not receive this and the client should
+            // disconnect on its own.
             space.members.forEach((_, otherId) => {
-              if (otherId !== memberId) {
+              if (otherId !== memberId && this.memberIdToSocket.has(otherId)) {
                 this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
                   "memberLeave", memberId);
               }
             });
+
+            // TODO: Forward the notification to other servers via coordinator
+            // (this will be implemented later).
+          } else {
+            // This should not happen since deleteMember is called only once
+            console.log("warning: member not found when calling deleteMember");
           }
 
           resolve();
@@ -407,9 +469,7 @@ export class SignalingServer {
       this.coordinator.publish("unsubscribeFromSpaceRequest",
         { uuid: spaceUuid },
         () => {
-          if (this.spaces.has(spaceUuid)) {
-            this.spaces.delete(spaceUuid);
-          }
+          this._removeSpace(spaceUuid);
           resolve();
         },
         (e: Error) => {
