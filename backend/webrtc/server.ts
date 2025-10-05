@@ -42,8 +42,8 @@ type MemberEventType = "spaceInit" | "transportParams";
 
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
-    data: SpaceData,
-    members: Map<number, ClientSideMember>,
+    receivingMemberId: number,
+    clientSideSpace: ClientSideSpace,
   };
   transportParams: {
     memberId: number,
@@ -65,6 +65,7 @@ interface SpaceWideEventContentMap extends Record<SpaceWideEventType, any> {
     memberId: number,
     newState: MemberState,
   };
+  spaceClose: {};
 }
 
 
@@ -84,6 +85,21 @@ interface ServerToClientEvents {
     content: SpaceWideEventContentMap[K]
   ) => void;
 
+  createWebRtcTransportAck: (cId: string) => void;
+  resendSpaceInitAck: (cId: string) => void;
+
+  transportProducerConnectAck: (cId: string) => void;
+  transportProducerProduceAck: (cId: string, producerId: string) => void;
+  transportConsumerConnectAck: (cId: string) => void;
+  transportConsumerConsumeAck: (
+    cId: string,
+    consumerId: string,
+    producerId: string,
+    kind: mediasoup.types.MediaKind,
+    rtpParameters: mediasoup.types.RtpParameters,
+  ) => void;
+  transportConsumerResumeAck: (cId: string) => void;
+  updateMemberStateAck: (cId: string) => void;
 }
 
 
@@ -91,14 +107,19 @@ interface ClientToServerEvents {
 
   disconnect: () => void;
 
-  // TODO: Implement this; the transport is already created when calling
-  // `prepareMember` but this one is for client-side checks/retries
+  // This is for client-side checks/retries
   createWebRtcTransport: (
-    args: { asProducer: boolean },
+    args: { consumesFromMemberId?: number },
+    cId: string,
   ) => Promise<void>;
 
+  resendSpaceInit: (cId: string) => Promise<void>;
+
   transportProducerConnect: (
-    args: { dtlsParameters: mediasoup.types.DtlsParameters },
+    args: {
+      dtlsParameters: mediasoup.types.DtlsParameters,
+    },
+    cId: string,
   ) => Promise<void>;
 
   transportProducerProduce: (
@@ -106,6 +127,7 @@ interface ClientToServerEvents {
       kind: mediasoup.types.MediaKind,
       rtpParameters: mediasoup.types.RtpParameters,
     },
+    cId: string,
   ) => Promise<void>;
 
   transportConsumerConnect: (
@@ -113,6 +135,7 @@ interface ClientToServerEvents {
       dtlsParameters: mediasoup.types.DtlsParameters,
       sourceMemberId: number,
     },
+    cId: string,
   ) => Promise<void>;
 
   transportConsumerConsume: (
@@ -120,12 +143,21 @@ interface ClientToServerEvents {
       rtpCapabilities: mediasoup.types.RtpCapabilities,
       sourceMemberId: number,
     },
+    cId: string,
   ) => Promise<void>;
 
+  // TODO: For better failure handling, we should have the client send the
+  // consumerId rather than just memberId, since we assume the consumer might
+  // fail at any time.
   transportConsumerResume: (
     args: { sourceMemberId: number },
+    cId: string,
   ) => Promise<void>;
 
+  updateMemberState: (
+    args: { newState: Partial<MemberState> },
+    cId: string,
+  ) => Promise<void>;
 }
 
 
@@ -151,7 +183,7 @@ interface Connection {
 }
 
 
-const FORWARD_ONLY_CLIENT_TO_SERVER_EVENTS_MAP: Map<keyof ClientToServerEvents,
+const FORWARD_AND_ACK_LISTEN_EVENTS_MAP: Map<keyof ClientToServerEvents,
   SpaceUpdateSTypes> = new Map([
     ["transportProducerConnect", "S:memberProducerConnectEvent"],
     ["transportProducerProduce", "S:memberProducerProduceEvent"],
@@ -257,15 +289,20 @@ export class SignalingServer {
     })
 
     // Prepare space and member
-    const spaceUuid = socket.data.spaceUuid;
+    const { spaceUuid, memberData, memberState } =
+      socket.handshake.auth as {
+        spaceUuid: string,
+        memberData: MemberData,
+        memberState: MemberState,
+      };
     const socketId = socket.id;
     try {
       await this.prepareSpace(spaceUuid);
       socket.emit("connectionSuccessful");
 
       const memberId = await this.prepareMember(spaceUuid, socketId,
-        socket.data.memberData, {
-          isMuted: false,
+        memberData, {
+          ...memberState,
           transportIsConnected: false,
         });
 
@@ -273,24 +310,39 @@ export class SignalingServer {
 
       // Start listening to WebSocket messages
 
-      socket.on("createWebRtcTransport", async ({ asProducer }) => {
-        // TODO: Implement this; we need the coordinator server to listen to
-        // a new type of space update.
+      socket.on("createWebRtcTransport", async ({ consumesFromMemberId }, cId) => {
+        // TODO: We're supposed to let the coordinator know to check if the
+        // transport is being processed, and start processing if not.
       })
+
+      socket.on("resendSpaceInit", async (cId) => {
+        // TODO: Handle this; we don't need to tell the coordinator.
+      })
+
+      socket.on("updateMemberState", async ({ newState }, cId) => {
+        try {
+          this.updateMember(memberId, newState);
+          socket.emit("updateMemberStateAck", cId);
+        } catch (err: any) {
+          // TODO: Need to handle failure properly
+          socket.emit("updateMemberStateAck", cId);
+        }
+      });
 
       // For all these message types, the signaling server simply forwards it
       // to the coordinator.
-      FORWARD_ONLY_CLIENT_TO_SERVER_EVENTS_MAP.forEach((spaceUpdateType,
+      FORWARD_AND_ACK_LISTEN_EVENTS_MAP.forEach((spaceUpdateType,
         clientEventType) => {
           // TODO: We probably should change the way we implement typing here
           // @ts-ignore ('data' implicitly has 'any' type)
-          socket.on(clientEventType, async (data) => {
+          socket.on(clientEventType, async (data, cId) => {
             this.coordinator.publish("spaceUpdateStream", {
               uuid: spaceUuid,
               type: spaceUpdateType,
               payload: { memberId, data },
             }, () => {
-              // Do nothing for now
+              // Acknowledge to the client
+              socket.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
             }, (e: Error) => {
               // TODO: Need retry mechanism, then notify client on failure
               throw new Error("failed to forward event: " + e.message);
@@ -301,8 +353,8 @@ export class SignalingServer {
       // This message also serves as confirmation that the client can start
       // sending messages back to the server.
       socket.emit("memberEvent", "spaceInit", {
-        data: space.data,
-        members: space.members,
+        receivingMemberId: memberId,
+        clientSideSpace: getClientSideSpace(space),
       });
       this.connections.get(socketId)!.memberId = memberId;
 
@@ -497,8 +549,9 @@ export class SignalingServer {
         }
 
         // Pass the transport parameters to the client
+        // Send own memberId if producer, else send consumesFromMemberId
         socket.emit("memberEvent", "transportParams", {
-          memberId: payload.memberId,
+          memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
         });
 

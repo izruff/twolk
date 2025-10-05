@@ -145,7 +145,7 @@ export class SfuWorker {
           .then((producer) => {
             transport.router.webRtcProducers.set(id, producer);
             // TODO: Handle events like "transportclose"
-            ack();
+            ack({ id: producer.id });
           })
           .catch((err) => nack(err));
 

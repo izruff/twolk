@@ -131,7 +131,8 @@ export type QueueResponseTypeMap = {
   removeMemberRequest: void;
   unsubscribeFromSpaceRequest: void;
   spaceUpdateStream: void;
-  transportUpdateStream: void;
+  // TODO: The `id` is for transportProducerProduce, we should generalize this later
+  transportUpdateStream: void | { id: string };
 }
 
 // Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
@@ -196,6 +197,7 @@ export type SpaceUpdateCPayloadTypeMap = {
   // Sent to provide transport parameters to client
   "C:transportParamsEvent": {
     memberId: number,
+    consumesFromMemberId?: number,
     options: mediasoupClient.types.TransportOptions,
   };
   // Sent to notify that a producer has successfully connected and
@@ -452,6 +454,7 @@ export class Coordinator {
             type: "C:transportParamsEvent",
             payload: {
               memberId: transport.owningMember.id,
+              consumesFromMemberId: transport.consumesFromTransportId,
               options: transport.metadata.options,
             },
           }, () => {
