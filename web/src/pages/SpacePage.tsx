@@ -1,53 +1,182 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router';
 import { Box, Grid, Stack, Text, Button, Group, Modal, ActionIcon } from '@mantine/core';
 import { IconMicrophone, IconMicrophoneOff, IconShare, IconSettings } from '@tabler/icons-react';
 
-const speakers = [
-  { id: '1', name: 'You', isSelf: true },
-  { id: '2', name: 'Alice', isSelf: false },
-  { id: '3', name: 'Bob', isSelf: false },
-  { id: '4', name: 'Charlie', isSelf: false },
-  { id: '5', name: 'Dana', isSelf: false },
-];
+import { SpaceMemberBox } from '../components/SpaceMemberBox';
+import { useSpace } from '../hooks/useSpace';
+
+import type { MemberClientEventType } from '../types/member';
+
 
 function SpacePage() {
   const [muted, setMuted] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  const audioContextRef = useRef<AudioContext>(new AudioContext());
+  const audioContextResumeResolverRef = useRef<(() => void) | null>(null);
+
+  const [producerAnalyzer, setProducerAnalyzer] = useState<AnalyserNode | null>(null);
+  const consumerAnalyzerRefs = useRef<Map<number, AnalyserNode | null>>(new Map());
+
+  const [userMediaTrack, setUserMediaTrack] = useState<MediaStreamTrack | null>(null);
+
+  const spaceUuid = useParams().id!;
+
+  const [space, snapshot] = useSpace(
+    spaceUuid,
+    { name: 'You' },
+    { isMuted: false },
+  );
+  console.log("Space snapshot:", snapshot);
+
+  function setUpAnalyzer(track: MediaStreamTrack) {
+    const analyzer = audioContextRef.current.createAnalyser();
+    analyzer.fftSize = 2048;
+    const source = audioContextRef.current.createMediaStreamSource(new MediaStream([track]));
+    source.connect(analyzer);
+    return analyzer;
+  }
+
+  // Preparing the space
+  useEffect(() => {
+    space.init(
+      () => { console.log("connected") },
+      () => { console.log("disconnected") },
+      ({ message }) => { console.error("failed:", message); },
+    );
+
+    space.onProducerMemberEvent((event) => {
+      if (event === "stateUpdated") {
+        // Ideally we can sync snapshot with local state to ensure consistency
+        // Ignore for now; we just use our local state and warn if inconsistent
+        // TODO
+      } else if (event === "transportReady") {
+        // Nothing to do right now; track will be set by another useEffect
+      } else {
+        console.warn("Unknown producer member event:", event);
+      }
+    });
+
+    space.onConsumerMemberEvent((memberId, event) => {
+      if (event === "stateUpdated") {
+        // Already handled by snapshot
+      } else if (event === "transportReady") {
+        const track = space.getConsumerTrack(memberId);
+        const analyzer = setUpAnalyzer(track);
+
+        if (consumerAnalyzerRefs.current.has(memberId)) {
+          consumerAnalyzerRefs.current.get(memberId)!.disconnect();
+        }
+        consumerAnalyzerRefs.current.set(memberId, analyzer);
+
+        analyzer.connect(audioContextRef.current.destination);
+      } else {
+        console.warn("Unknown consumer member event:", event);
+      }
+    });
+
+    space.onSpaceInit(() => {
+      const audioContextResumePromise = new Promise<void>((resolve) => {
+        if (audioContextRef.current.state === "running") {
+          resolve();
+        } else {
+          audioContextResumeResolverRef.current = resolve;
+        }
+      });
+      audioContextResumePromise
+        .then(() => {
+          console.log("Audio context resumed; preparing to initialize transport factory");
+          return space.initTransportFactory(audioContextRef.current);
+        })
+        .then(() => {
+          console.log("Transport factory initialized for space");
+        })
+        .catch((error) => {
+          // TODO: How to handle this?
+          console.error("Failed to initialize transport factory for space:", error);
+        });
+    });
+
+    return () => space.cleanup();
+  }, [space]);
+
+  // Wait for user interaction to resume audio context
+  useEffect(() => {
+    const handleInteraction = () => {
+      if (audioContextRef.current.state === "suspended") {
+        audioContextRef.current.resume().then(() => {
+          console.log("Audio context resumed");
+          if (audioContextResumeResolverRef.current) {
+            audioContextResumeResolverRef.current();
+            audioContextResumeResolverRef.current = null;
+          }
+        });
+      }
+      window.removeEventListener('click', handleInteraction);
+    };
+    window.addEventListener('click', handleInteraction);
+    return () => {
+      window.removeEventListener('click', handleInteraction);
+    };
+  }, []);
+
+  // Requesting for user media
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then((stream) => {
+        const audioTrack = stream.getAudioTracks()[0];
+        audioTrack.enabled = true;  // TODO
+        setUserMediaTrack(audioTrack);
+        setProducerAnalyzer(setUpAnalyzer(audioTrack));
+        console.log("Analyzer for user media set up");
+      })
+      .catch((err) => {
+        console.error("Failed to get user media:", err);
+      });
+  }, []);
+
+  // Set producer track once user media is ready
+  useEffect(() => {
+    if (!space || !userMediaTrack) return;
+    if (space.producerIsReady()) {
+      space.setProducerTrack(userMediaTrack);
+    } else {
+      const handler = (event: MemberClientEventType) => {
+        if (event === "transportReady") {
+          space.setProducerTrack(userMediaTrack);
+          space.offProducerMemberEvent(handler);
+        }
+      };
+      space.onProducerMemberEvent(handler);
+    }
+  }, [space, userMediaTrack]);
+
+  if (snapshot === null) {
+    return (
+      <Box style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+        <Text size="xl">Loading...</Text>
+      </Box>
+    );
+  }
+
   return (
     <Box style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Stack justify="center" align="center" style={{ flex: 1, width: '100%' }}>
         <Grid gutter="xl" style={{ width: '100%', maxWidth: 900 }}>
-          {speakers.map((speaker) => (
-            <Grid.Col span={12 / Math.min(speakers.length, 4)} key={speaker.id}>
-              <Box
-                style={{
-                  borderRadius: 20,
-                  background: speaker.isSelf ? '#e0f7fa' : '#f5f5f5',
-                  border: speaker.isSelf ? '2px solid #00bcd4' : '1px solid #ddd',
-                  aspectRatio: '1.3/1',
-                  minHeight: 120,
-                  minWidth: 140,
-                  maxWidth: 220,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'flex-end',
-                  alignItems: 'flex-end',
-                  padding: 24,
-                  position: 'relative',
-                  boxShadow: speaker.isSelf ? '0 0 0 2px #00bcd4' : 'none',
-                }}
-              >
-                <Text
-                  size="md"
-                  fw={speaker.isSelf ? 700 : 500}
-                  color={speaker.isSelf ? 'cyan.7' : 'dark'}
-                  style={{ position: 'absolute', bottom: 16, right: 18 }}
-                >
-                  {speaker.name}
-                </Text>
-              </Box>
+          {snapshot.members.map(({ id, data, state }) => (
+            <Grid.Col span={12 / Math.min(snapshot.members.length, 4)} key={id}>
+              <SpaceMemberBox
+                data={data}
+                isSelf={id === snapshot.producer.id}
+                isMuted={state.isMuted}
+                analyzer={
+                  id === snapshot.producer.id
+                    ? producerAnalyzer
+                    : null
+                }
+              />
             </Grid.Col>
           ))}
         </Grid>

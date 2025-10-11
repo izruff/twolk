@@ -1,4 +1,4 @@
-import { type MemberData, type MemberState } from "./member";
+import { type MemberData, type MemberState, type MemberStateFromClient } from "./member";
 import { type SpaceData } from "./space";
 import { SocketWrapper } from "./socket";
 import { getRandomUUID } from "../utils/random";
@@ -16,7 +16,7 @@ export interface ClientSideMember {
 export interface ClientSideSpace {
   uuid: string;
   data: SpaceData;
-  members: Map<number, ClientSideMember>;
+  members: ClientSideMember[];
 }
 
 type MemberEventType = "spaceInit" | "transportParams";
@@ -24,6 +24,7 @@ type MemberEventType = "spaceInit" | "transportParams";
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
     receivingMemberId: number,
+    routerRtpCapabilities: mediasoupClient.types.RtpCapabilities,
     clientSideSpace: ClientSideSpace,
   };
   transportParams: {
@@ -132,7 +133,7 @@ interface ClientToServerEvents {
   ) => void;
 
   updateMemberState: (
-    args: { newState: Partial<MemberState> },
+    args: { newState: Partial<MemberStateFromClient> },
     cId: string,
   ) => Promise<void>;
 }
@@ -151,12 +152,12 @@ export class SignalingSocketWrapper extends SocketWrapper<SignalingSocket> {
 
   status: "disconnected" | "connecting" | "connected"
 
-  constructor(socket: SignalingSocket, spaceUuid: string, memberData: MemberData, memberState: MemberState) {
+  constructor(socket: SignalingSocket, spaceUuid: string, memberData: MemberData, memberState: MemberStateFromClient) {
     super(socket);
 
-    // The socket is supposed to be disconnected before being wrapped.
-    if (this._socket.connected) {
-      throw new Error("socket must be disconnected upon wrapping");
+    // The socket should not attempt connection before being wrapped.
+    if (this._socket.active) {
+      throw new Error("socket must not be active upon wrapping");
     }
 
     this._socket.auth = {
@@ -166,10 +167,10 @@ export class SignalingSocketWrapper extends SocketWrapper<SignalingSocket> {
     };
 
     this.status = "disconnected";
-    this._socket.on("connect", this.handleConnect);
-    this._socket.on("disconnect", this.handleDisconnect);
-    this._socket.on("memberEvent", this.handleMemberEvent);
-    this._socket.on("spaceWideEvent", this.handleSpaceWideEvent);
+    this._socket.on("connect", this.handleConnect.bind(this));
+    this._socket.on("disconnect", this.handleDisconnect.bind(this));
+    this._socket.on("memberEvent", this.handleMemberEvent.bind(this));
+    this._socket.on("spaceWideEvent", this.handleSpaceWideEvent.bind(this));
   }
 
   isConnected(): boolean {
@@ -220,7 +221,7 @@ export class SignalingSocketWrapper extends SocketWrapper<SignalingSocket> {
     this.spaceWideHandlers.get(type)?.delete(handler as (payload: SpaceWideEventContentMap[SpaceWideEventType]) => void);
   }
 
-  updateMemberState(newState: Partial<MemberState>): Promise<void> {
+  updateMemberState(newState: Partial<MemberStateFromClient>): Promise<void> {
     const cId = getRandomUUID();
     this.emit("updateMemberState", { newState }, cId);
 

@@ -12,6 +12,15 @@ import { getPublicIpAddress } from "./utils/network.ts";
 
 import mediasoup from "mediasoup";
 
+const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
+  {
+    kind: "audio",
+    mimeType: "audio/opus",
+    clockRate: 48000,
+    channels: 2,
+  },
+]
+
 
 interface Router {
   id: number;
@@ -45,8 +54,16 @@ export class SfuWorker {
     this.routers = new Map();
     this.transports = new Map();
 
-    this.coordinator.consume("newRouterRequest", this.onNewRouterRequest);
-    
+    this.coordinator.consume("newRouterRequest", this.onNewRouterRequest.bind(this));
+    this.coordinator.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this));
+    this.coordinator.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+
+    // For debugging; print contents of all maps every 5 seconds
+    // setInterval(() => {
+    //   console.log("=== SFU Worker State ===");
+    //   console.log("Routers:", this.routers);
+    //   console.log("Transports:", this.transports);
+    // }, 5000);
   }
 
   static async create(
@@ -67,8 +84,8 @@ export class SfuWorker {
   onNewRouterRequest: QueueConsumerCallback<"newRouterRequest"> =
     async ({ assignedId }, ack, nack) => {
       try {
-        await this.createRouter(assignedId);
-        ack();
+        const router = await this.createRouter(assignedId);
+        ack({ rtpCapabilities: router.mediasoupRouter.rtpCapabilities });
       } catch (err: any) {
         nack(err);
       }
@@ -110,7 +127,6 @@ export class SfuWorker {
         } else {
           router.webRtcConsumerTransports.set(assignedId, transport);
         }
-
         // Send back the transport parameters
         ack({
           options: {
@@ -127,6 +143,8 @@ export class SfuWorker {
 
   onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
     ({ id, type, payload }, ack, nack) => {
+      if (type.startsWith("W:")) return;
+
       const transport = this.transports.get(id);
       if (transport === undefined) {
         nack(new Error("transport not found"));
@@ -140,6 +158,7 @@ export class SfuWorker {
           .catch((err) => nack(err));
 
       } else if (type === "C:transportProducerProduceEvent") {
+        console.log("Received C:transportProducerProduceEvent:", payload);
         const { kind, rtpParameters } = payload;
         transport.mediasoupTransport.produce({ kind, rtpParameters })
           .then((producer) => {
@@ -154,6 +173,14 @@ export class SfuWorker {
         const producingTransport = this.transports.get(producingTransportId);
         if (producingTransport === undefined) {
           nack(new Error("producing transport not found"));
+          return;
+        }
+
+        if (!transport.router.mediasoupRouter.canConsume({
+          producerId: producingTransport.mediasoupTransport.id,
+          rtpCapabilities,
+        })) {
+          nack(new Error("cannot consume"));
           return;
         }
 
@@ -186,9 +213,9 @@ export class SfuWorker {
       }
     }
 
-  async createRouter(assignedRouterId: number) {
+  async createRouter(assignedRouterId: number): Promise<Router> {
     // TODO: Not sure what the router options should be
-    const mediasoupRouter = await this.mediasoupWorker.createRouter();
+    const mediasoupRouter = await this.mediasoupWorker.createRouter({ mediaCodecs: MEDIA_CODECS });
     const router: Router = {
       id: assignedRouterId,
       mediasoupRouter,
@@ -198,6 +225,7 @@ export class SfuWorker {
       webRtcConsumers: new Map(),
     };
     this.routers.set(assignedRouterId, router);
+    return router;
   }
 }
 

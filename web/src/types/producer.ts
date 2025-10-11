@@ -11,4 +11,12 @@ export class Producer {
     this._mediasoupProducer = mediasoupProducer;
     // TODO: Handle producer events here
   }
+
+  async setTrack(track: MediaStreamTrack) {
+    if (!this._mediasoupProducer) {
+      throw new Error("mediasoup producer not assigned");
+    }
+
+    await this._mediasoupProducer.replaceTrack({ track });
+  }
 }

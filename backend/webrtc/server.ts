@@ -13,13 +13,14 @@ to worry about race conditions and order of operations too much.
 
 */
 
-import {
-  Coordinator, SpaceData, MemberData, MemberState, QueueConsumerCallback,
-  type SpaceUpdateSTypes, type ClientSideSpace, type ClientSideMember
+import { Coordinator } from "./coordinator.ts";
+import type {
+  SpaceData, MemberData, MemberState, QueueConsumerCallback,
+  SpaceUpdateSTypes, ClientSideSpace, ClientSideMember
 } from "./coordinator.ts";
 
 import https from "node:https";
-import { Server as BaseServer, Socket as BaseSocket } from "socket.io";
+import { Server as BaseServer, Socket as BaseSocket, type ServerOptions } from "socket.io";
 import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
 
@@ -36,6 +37,12 @@ interface Space {
   uuid: string;
   data: SpaceData;
   members: Map<number, Member>;
+
+  // TODO: Right now, we make simplified assumptions about transport router allocation.
+  // We assume that the routerRtpCapabilities we receive are the same for all transports
+  // in the space. In reality, routerRtpCapabilities can differ between transports, and
+  // we have not made guarantees on where each transport will get allocated.
+  routerRtpCapabilities: mediasoup.types.RtpCapabilities;
 }
 
 type MemberEventType = "spaceInit" | "transportParams";
@@ -43,6 +50,7 @@ type MemberEventType = "spaceInit" | "transportParams";
 interface MemberEventContentMap extends Record<MemberEventType, any> {
   spaceInit: {
     receivingMemberId: number,
+    routerRtpCapabilities: mediasoup.types.RtpCapabilities,
     clientSideSpace: ClientSideSpace,
   };
   transportParams: {
@@ -154,6 +162,7 @@ interface ClientToServerEvents {
     cId: string,
   ) => Promise<void>;
 
+  // TODO: We should restrict to client-sourced states only
   updateMemberState: (
     args: { newState: Partial<MemberState> },
     cId: string,
@@ -194,9 +203,8 @@ const FORWARD_AND_ACK_LISTEN_EVENTS_MAP: Map<keyof ClientToServerEvents,
 
 
 function getClientSideSpace(space: Space): ClientSideSpace {
-  const clientSideMembers = new Map<number, ClientSideMember>(
-    Array.from(space.members.values()).map(
-      (member) => [member.id, getClientSideMember(member)]));
+  const clientSideMembers = Array.from(space.members.values()).map(
+    (member) => getClientSideMember(member));
   return {
     uuid: space.uuid,
     data: space.data,
@@ -233,23 +241,34 @@ export class SignalingServer {
     this.spaces = new Map();
     this.members = new Map();
 
-    this.server.on("connection", this.onConnection);
+    this.server.on("connection", this.onConnection.bind(this));
 
-    this.coordinator.consume("spaceUpdateStream", this.onSpaceUpdate);
+    this.coordinator.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
+
+    // For debugging; print contents of all maps every 5 seconds
+    // setInterval(() => {
+    //   console.log("=== Signaling Server State ===");
+    //   console.log("Spaces:", this.spaces);
+    //   console.log("Members:", this.members);
+    //   console.log("Connections:", this.connections);
+    //   console.log("MemberId to Socket Map:", this.memberIdToSocket);
+    // }, 5000);
   }
 
-  static create(httpsOptions: https.ServerOptions, port: number,
-    coordinator: Coordinator): SignalingServer {
+  static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
+    port: number, coordinator: Coordinator): SignalingServer {
     const httpsServer = https.createServer(httpsOptions);
     httpsServer.listen(port);
 
-    const server = new BaseServer(httpsServer);
-
+    const server: Server = new BaseServer(httpsServer, ioOptions);
     return new SignalingServer(server, coordinator);
   }
 
-  _addSpace(uuid: string, data: SpaceData): Space {
-    const space: Space = { uuid, data, members: new Map() };
+  _addSpace(uuid: string, data: SpaceData,
+    routerRtpCapabilities: mediasoup.types.RtpCapabilities): Space {
+    const space: Space = {
+      uuid, data, members: new Map(), routerRtpCapabilities,
+    };
     this.spaces.set(uuid, space);
     return space;
   }
@@ -261,7 +280,7 @@ export class SignalingServer {
   _addMember(id: number, space: Space, data: MemberData,
     initialState: MemberState): Member {
     const member: Member = {
-      id, owningSpace: space, data, state: initialState
+      id, owningSpace: space, data, state: initialState,
     };
     this.members.set(id, member);
     space.members.set(id, member);
@@ -352,8 +371,10 @@ export class SignalingServer {
 
       // This message also serves as confirmation that the client can start
       // sending messages back to the server.
+      console.log(`Member ${memberId} successfully joined space ${spaceUuid}`);
       socket.emit("memberEvent", "spaceInit", {
         receivingMemberId: memberId,
+        routerRtpCapabilities: space.routerRtpCapabilities,
         clientSideSpace: getClientSideSpace(space),
       });
       this.connections.get(socketId)!.memberId = memberId;
@@ -375,10 +396,11 @@ export class SignalingServer {
 
     const promise = new Promise<void>((resolve) => {
       this.coordinator.publish("subscribeToSpaceRequest", { uuid },
-        ({ clientSideSpace }) => {
+        ({ clientSideSpace, routerRtpCapabilities }) => {
           if (!this.spaces.has(uuid)) {
             // Create the space and existing members object
-            const space = this._addSpace(uuid, clientSideSpace.data);
+            const space = this._addSpace(uuid, clientSideSpace.data,
+              routerRtpCapabilities);
             clientSideSpace.members.forEach(({ id, data, state }) => {
               this._addMember(id, space, data, state);
             });
@@ -427,7 +449,7 @@ export class SignalingServer {
             space.members.forEach((_, otherId) => {
               if (otherId !== id && this.memberIdToSocket.has(otherId)) {
                 this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
-                  "memberJoin", getClientSideMember(member));
+                  "memberJoin", { member: getClientSideMember(member) });
               }
             });
 
@@ -450,6 +472,7 @@ export class SignalingServer {
   }
 
   updateMember(memberId: number, update: Partial<MemberState>) {
+    console.log("Updating member", memberId, "with", update);
     const member = this.members.get(memberId);
     if (member === undefined) {
       throw new Error("member not found");
@@ -459,6 +482,7 @@ export class SignalingServer {
     // Notify all members in the space (whose sockets we own)
     member.owningSpace.members.forEach((_, id) => {
       if (this.memberIdToSocket.has(id)) {
+        console.log("Notifying member", id, "about state update of member", memberId);
         this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
           memberId, newState: member.state
         });
@@ -535,6 +559,8 @@ export class SignalingServer {
 
   onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
     ({ uuid, type, payload }, ack, nack) => {
+      if (type.startsWith("S:")) return;
+
       const space = this.spaces.get(uuid);
       if (space === undefined) {
         nack(new Error("space not found"));
@@ -558,12 +584,13 @@ export class SignalingServer {
         ack();
       } else if (type === "C:producerConnectedEvent") {
         try {
+          this.updateMember(payload.memberId, { transportIsConnected: true });
           // Notify all other members that they can start consuming
-          space.members.forEach((_, id) => {
-            if (id !== payload.memberId) {
-              this.updateMember(id, { transportIsConnected: true });
-            }
-          });
+          // space.members.forEach((_, id) => {
+          //   if (id !== payload.memberId) {
+              
+          //   }
+          // });
         } catch (err: any) {
           nack(err);
           return;

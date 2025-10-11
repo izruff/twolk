@@ -5,11 +5,17 @@ export interface MemberData {
   name: string;
 }
 
-export interface MemberState {
+export interface MemberStateFromClient {
   isMuted: boolean;
 }
 
-export type MemberClientEventType = "stateUpdated" | "transportAssigned";
+interface MemberStateFromServer {
+  transportIsConnected: boolean;
+}
+
+export type MemberState = MemberStateFromClient & MemberStateFromServer;
+
+export type MemberClientEventType = "stateUpdated" | "transportReady";
 
 
 export class Member<TTransport extends Transport> {
@@ -48,6 +54,8 @@ export class Member<TTransport extends Transport> {
 
   assignTransport(transport: TTransport) {
     this._transport = transport;
-    this.emitEvent("transportAssigned");
+    this._transport.onceReady(() => {
+      this.emitEvent("transportReady");
+    })
   }
 }

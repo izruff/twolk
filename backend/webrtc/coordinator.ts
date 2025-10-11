@@ -35,10 +35,10 @@ export interface MemberData {
 }
 
 export interface MemberState {
-  // Maintained by both backend and client
+  // Changes made by the client
   isMuted: boolean;
 
-  // Maintained by backend only
+  // Changes made by the server
   transportIsConnected: boolean;
 }
 
@@ -54,6 +54,7 @@ interface Member {
 interface Router {
   id: number;
   owningSpace: Space;
+  rtpCapabilities: mediasoup.types.RtpCapabilities | null;
   transports: Map<number, Transport>;
 }
 
@@ -73,7 +74,7 @@ interface Transport {
 }
 
 export type ClientSideSpace = Omit<Space, "primaryRouter" | "members"> & {
-  members: Map<number, ClientSideMember>;
+  members: ClientSideMember[];
 };
 
 export type ClientSideMember = Omit<Member,
@@ -118,12 +119,15 @@ export type QueuePayloadTypeMap = {
 }
 
 export type QueueResponseTypeMap = {
-  newRouterRequest: void;
+  newRouterRequest: {
+    rtpCapabilities: mediasoup.types.RtpCapabilities,
+  };
   newWebRtcTransportRequest: {
     options: mediasoupClient.types.TransportOptions,
   };
   subscribeToSpaceRequest: {
     clientSideSpace: ClientSideSpace;
+    routerRtpCapabilities: mediasoup.types.RtpCapabilities;
   };
   addMemberRequest: {
     id: number,
@@ -307,12 +311,21 @@ export class Coordinator {
     this.spaceSubscriptions = new Map();
     this.spaceToSubscribedMap = new Map();
 
-    this.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest);
-    this.consume("addMemberRequest", this.onAddMemberRequest);
-    this.consume("removeMemberRequest", this.onRemoveMemberRequest);
-    this.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest);
-    this.consume("spaceUpdateStream", this.onSpaceUpdate);
-    this.consume("transportUpdateStream", this.onTransportUpdate);
+    this.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this));
+    this.consume("addMemberRequest", this.onAddMemberRequest.bind(this));
+    this.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this));
+    this.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this));
+    this.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
+    this.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+
+    // For debugging; print contents of all maps every 5 seconds
+    // setInterval(() => {
+    //   console.log("=== Coordinator State ===");
+    //   console.log("Spaces:", this.spaces);
+    //   console.log("Members:", this.members);
+    //   console.log("Routers:", this.routers);
+    //   console.log("Transports:", this.transports);
+    // }, 5000);
   }
 
   _getNewTransportId() {
@@ -434,6 +447,7 @@ export class Coordinator {
     this.transports.set(id, transport);
     router.transports.set(id, transport);
     member.producer = transport;
+    console.log(`[${(new Date()).toISOString()}] Added unallocated transport ${id} (member=${member.id}, consumesFromTransportId=${consumesFromTransportId})`);
 
     // Return the transport once it is successfully allocated, or an error occurred
     // while allocating.
@@ -445,6 +459,7 @@ export class Coordinator {
       }, ({ options }) => {
         transport.metadata = { options };
         transport.status = "allocated";
+        console.log(`[${(new Date()).toISOString()}] Transport ${id} allocated`);
 
         // TODO: Get list of all subscribed servers instead of just 0
         const spaceUuid = transport.owningRouter.owningSpace.uuid;
@@ -488,6 +503,7 @@ export class Coordinator {
       const id = this._getNewRouterId();
       const router: Router = {
         id, owningSpace: space,
+        rtpCapabilities: null,
         transports: new Map(),
       }
       this.routers.set(id, router);
@@ -495,12 +511,15 @@ export class Coordinator {
       // Return the router once it is successfully allocated, or an error
       // occurred while allocating.
       return new Promise<Router>((resolve, reject) => {
-        this.publish("newRouterRequest", { assignedId: router.id }, () => {
-          space.primaryRouter = router;
-          resolve(router);
-        }, (e: Error) => {
-          reject(new Error("newRouterRequest nacked: " + e.message));
-        })
+        this.publish("newRouterRequest", { assignedId: router.id },
+          ({ rtpCapabilities }) => {
+            router.rtpCapabilities = rtpCapabilities;
+            space.primaryRouter = router;
+            resolve(router);
+          },
+          (e: Error) => {
+            reject(new Error("newRouterRequest nacked: " + e.message));
+          })
       })
     } else {
       return space.primaryRouter;
@@ -554,10 +573,16 @@ export class Coordinator {
     ({ uuid }, ack, nack) => {
       // Callback function to subscribe and ack after the space is ready
       const subscribeAndAckFn = () => {
+        const space = this.spaces.get(uuid)!;
+        if (space.primaryRouter === null ||
+          space.primaryRouter.rtpCapabilities === null) {
+            // This should not happen because _allocateRouter waits for router
+            // allocation to finish before calling this function.
+            nack(new Error("space router not allocated yet"));
+            return;
+          }
         // TODO: Replace 0 with actual signaling server ID
         this._subscribeToSpace(0, uuid);
-
-        const space = this.spaces.get(uuid)!;
 
         // Deep-copy the objects instead of sharing reference (only because
         // we are simulating everything in one process).
@@ -565,12 +590,14 @@ export class Coordinator {
           clientSideSpace: {
             uuid: space.uuid,
             data: structuredClone(space.data),
-            members: new Map<number, ClientSideMember>(
-              Array.from(space.members.entries()).map(([id, member]) => [
-                id, { id, data: structuredClone(member.data),
-                  state: structuredClone(member.state) }])
+            members: Array.from(space.members.entries()).map(
+              ([id, member]) => ({
+                id, data: structuredClone(member.data),
+                state: structuredClone(member.state)
+              })
             ),
-          }
+          },
+          routerRtpCapabilities: space.primaryRouter.rtpCapabilities,
         });
       }
 
@@ -709,6 +736,8 @@ export class Coordinator {
 
   onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
     ({ uuid, type, payload }, ack, nack) => {
+      if (type.startsWith("C:")) return;
+
       const space = this.spaces.get(uuid);
       if (space === undefined) {
         nack(new Error("space not found"));
@@ -738,6 +767,7 @@ export class Coordinator {
             },
           }, () => {
             transport.status = "connected";
+            console.log(`[${(new Date()).toISOString()}] Producer transport ${transport.id} connected`);
             ack();
           }, (e: Error) => {
             // TODO: Need retry mechanism
@@ -748,6 +778,7 @@ export class Coordinator {
         }
 
       } else if (type === "S:memberProducerProduceEvent") {
+        console.log("Received S:memberProducerProduceEvent:", payload);
         const member = space.members.get(payload.memberId);
         if (member === undefined) {
           nack(new Error("member not found"));
@@ -755,8 +786,12 @@ export class Coordinator {
         }
 
         const transport = member.producer;
-        if (transport === null || transport.status != "connected") {
-          nack(new Error("transport not connected"));
+        // if (transport === null || transport.status != "connected") {
+        //   nack(new Error("transport not connected"));
+        //   return;
+        // }
+        if (transport === null || transport.status == "unallocated") {
+          nack(new Error("transport not allocated"));
           return;
         }
 
@@ -769,10 +804,12 @@ export class Coordinator {
             rtpParameters: payload.data.rtpParameters,
           },
         }, () => {
+          console.log("Producer started for member", payload.memberId);
           ack();
           // Notify the space members about the new producer
           // TODO: Get list of all subscribed servers instead of just 0
           if (this._isSubscribedToSpace(0, uuid)) {
+            console.log("Notifying space members about new producer for member", payload.memberId);
             this.publish("spaceUpdateStream", {
               uuid,
               type: "C:producerConnectedEvent",
@@ -817,6 +854,7 @@ export class Coordinator {
             },
           }, () => {
             transport.status = "connected";
+            console.log(`[${(new Date()).toISOString()}] Consumer transport ${transport.id} connected`);
             ack();
           }, (e: Error) => {
             // TODO: Need retry mechanism
@@ -827,6 +865,7 @@ export class Coordinator {
         }
 
       } else if (type === "S:memberConsumerConsumeEvent") {
+        console.log("Received S:memberConsumerConsumeEvent:", payload);
         const member = space.members.get(payload.memberId);
         if (member === undefined) {
           nack(new Error("member not found"));
@@ -841,8 +880,13 @@ export class Coordinator {
 
         const transport = member.memberToConsumerMap.get(
           payload.data.sourceMemberId);
-        if (transport === undefined || transport.status !== "connected") {
-          nack(new Error("transport not connected"));
+        // if (transport === undefined || transport.status !== "connected") {
+        //   nack(new Error("transport not connected"));
+        //   return;
+        // }
+        console.log("S:memberConsumerConsumeEvent transport:", transport);
+        if (transport === undefined || transport.status == "unallocated") {
+          nack(new Error("transport not allocated"));
           return;
         }
 
@@ -872,8 +916,12 @@ export class Coordinator {
 
         const transport = member.memberToConsumerMap.get(
           payload.data.sourceMemberId);
-        if (transport === undefined || transport.status !== "connected") {
-          nack(new Error("transport not connected"));
+        // if (transport === undefined || transport.status !== "connected") {
+        //   nack(new Error("transport not connected"));
+        //   return;
+        // }
+        if (transport === undefined || transport.status == "unallocated") {
+          nack(new Error("transport not allocated"));
           return;
         }
 
@@ -899,6 +947,8 @@ export class Coordinator {
 
   onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
     ({ id, type, payload }, ack, nack) => {
+      if (type.startsWith("C:")) return;
+
       const transport = this.transports.get(id);
       if (transport === undefined) {
         nack(new Error("transport not found"));

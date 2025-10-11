@@ -13,6 +13,13 @@ const io = SignalingServer.create(
     key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
     cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),
   },
+  {
+    cors: {
+      origin: "http://localhost:5173",
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+  },
   3000,
   coordinator,
 );

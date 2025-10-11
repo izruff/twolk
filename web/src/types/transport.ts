@@ -4,13 +4,33 @@ import { SignalingSocketWrapper } from './signaling.socket';
 import { Producer } from './producer';
 import { Consumer } from './consumer';
 import { getRandomUUID } from '../utils/random';
+import { createSilentTrack } from '../utils/media';
 
 
-export class Transport {
+export abstract class Transport {
   _mediasoupTransport: mediasoupClient.types.Transport;
+
+  onceReadyHandlers: (() => void)[] = [];
 
   constructor(mediasoupTransport: mediasoupClient.types.Transport) {
     this._mediasoupTransport = mediasoupTransport;
+  }
+
+  abstract isReady(): boolean;
+
+  onceReady(handler: () => void) {
+    if (this.isReady()) {
+      handler();
+      return;
+    }
+    this.onceReadyHandlers.push(handler);
+  }
+
+  notifyReady() {
+    this.onceReadyHandlers.forEach((handler) => {
+      handler();
+    });
+    this.onceReadyHandlers = [];
   }
 }
 
@@ -23,8 +43,13 @@ export class ProducerTransport extends Transport {
     this._producer = producer;
   }
 
+  isReady(): boolean {
+    return this._producer._mediasoupProducer !== null;
+  }
+
   assignMediasoupProducer(mediasoupProducer: mediasoupClient.types.Producer) {
     this._producer.assignMediasoupProducer(mediasoupProducer);
+    this.notifyReady();
   }
 }
 
@@ -37,8 +62,13 @@ export class ConsumerTransport extends Transport {
     this._consumer = consumer;
   }
 
+  isReady(): boolean {
+    return this._consumer._mediasoupConsumer !== null;
+  }
+
   assignMediasoupConsumer(mediasoupConsumer: mediasoupClient.types.Consumer) {
     this._consumer.assignMediasoupConsumer(mediasoupConsumer);
+    this.notifyReady();
   }
 }
 
@@ -46,13 +76,61 @@ export class ConsumerTransport extends Transport {
 export class TransportFactory {
   _mediasoupDevice: mediasoupClient.Device;
   _socket: SignalingSocketWrapper;
+
+  _audioContext: AudioContext | null = null;
+
+  _isReady: boolean = false;
+  _onceReadyHandlers: (() => void)[] = [];
   
   constructor(mediasoupDevice: mediasoupClient.Device, socket: SignalingSocketWrapper) {
     this._mediasoupDevice = mediasoupDevice;
     this._socket = socket;
   }
 
+  async init(routerRtpCapabilities: mediasoupClient.types.RtpCapabilities) {
+    await this._mediasoupDevice.load({ routerRtpCapabilities });
+    console.log("Mediasoup device loaded with RTP capabilities:", this._mediasoupDevice.rtpCapabilities);
+    if (!this._isReady && this._audioContext !== null) {
+      this._isReady = true;
+      this.notifyReady();
+    }
+  }
+
+  assignAudioContext(audioContext: AudioContext) {
+    if (audioContext.state === "suspended") {
+      throw new Error("audio context must be running");
+    }
+    this._audioContext = audioContext;
+    if (!this._isReady && this._mediasoupDevice.loaded) {
+      this._isReady = true;
+      this.notifyReady();
+    }
+  }
+
+  isReady(): boolean {
+    return this._isReady;
+  }
+
+  onceReady(handler: () => void) {
+    if (this.isReady()) {
+      handler();
+      return;
+    }
+    this._onceReadyHandlers.push(handler);
+  }
+
+  notifyReady() {
+    this._onceReadyHandlers.forEach((handler) => {
+      handler();
+    });
+    this._onceReadyHandlers = [];
+  }
+
   createProducer(options: mediasoupClient.types.TransportOptions): ProducerTransport {
+    if (!this.isReady()) {
+      throw new Error("transport factory not ready");
+    }
+
     const mediasoupTransport = this._mediasoupDevice.createSendTransport(options);
 
     mediasoupTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
@@ -101,7 +179,7 @@ export class TransportFactory {
     const transport = new ProducerTransport(mediasoupTransport, new Producer());
 
     // Emit a signal to produce
-    mediasoupTransport.produce(options).then((mediasoupProducer) => {
+    mediasoupTransport.produce({ track: createSilentTrack(this._audioContext!) }).then((mediasoupProducer) => {
       transport.assignMediasoupProducer(mediasoupProducer);
     }).catch((err: Error) => {
       console.error("Failed to produce:", err);
@@ -111,6 +189,10 @@ export class TransportFactory {
   }
 
   createConsumer(options: mediasoupClient.types.TransportOptions, sourceMemberId: number): ConsumerTransport {
+    if (!this.isReady()) {
+      throw new Error("transport factory not ready");
+    }
+
     const mediasoupTransport = this._mediasoupDevice.createRecvTransport(options);
 
     mediasoupTransport.on('connect', ({ dtlsParameters }, callback, errback) => {
