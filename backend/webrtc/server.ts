@@ -296,9 +296,13 @@ export class SignalingServer {
   }
 
   async onConnection(socket: Socket) {
+    console.log(`[${socket.id}] connected`);
+
     this.connections.set(socket.id, { socket });
 
     socket.on("disconnect", () => {
+      console.log(`[${socket.id}] disconnected`);
+
       const memberId = this.connections.get(socket.id)!.memberId;
       if (memberId !== undefined) {
         this.memberIdToSocket.delete(memberId);
@@ -318,6 +322,7 @@ export class SignalingServer {
     try {
       await this.prepareSpace(spaceUuid);
       socket.emit("connectionSuccessful");
+      console.log(`[${socket.id}] sent connectionSuccessful`);
 
       const memberId = await this.prepareMember(spaceUuid, socketId,
         memberData, {
@@ -339,12 +344,15 @@ export class SignalingServer {
       })
 
       socket.on("updateMemberState", async ({ newState }, cId) => {
+        console.log(`[${socket.id}] received updateMemberState; newState:`, newState, "cId:", cId);
         try {
           this.updateMember(memberId, newState);
           socket.emit("updateMemberStateAck", cId);
+          console.log(`[${socket.id}] sent updateMemberStateAck; cId:`, cId);
         } catch (err: any) {
           // TODO: Need to handle failure properly
           socket.emit("updateMemberStateAck", cId);
+          console.log(`[${socket.id}] sent updateMemberStateAck; cId:`, cId);
         }
       });
 
@@ -355,16 +363,28 @@ export class SignalingServer {
           // TODO: We probably should change the way we implement typing here
           // @ts-ignore ('data' implicitly has 'any' type)
           socket.on(clientEventType, async (data, cId) => {
+            console.log(`[${socket.id}] received ${clientEventType}; data:`, data, "cId:", cId);
             this.coordinator.publish("spaceUpdateStream", {
               uuid: spaceUuid,
               type: spaceUpdateType,
               payload: { memberId, data },
-            }, () => {
-              // Acknowledge to the client
-              socket.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
+            }, (resp) => {
+              // Acknowledge to the client. Produce/consume require extra
+              // fields from the response to set up the client-side
+              // producer/consumer object.
+              if (clientEventType === "transportProducerProduce") {
+                socket.emit("transportProducerProduceAck", cId, resp!.id);
+              } else if (clientEventType === "transportConsumerConsume") {
+                socket.emit("transportConsumerConsumeAck", cId,
+                  resp!.id, resp!.producerId!, resp!.kind!, resp!.rtpParameters!);
+              } else {
+                socket.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
+              }
+              console.log(`[${socket.id}] sent ${clientEventType + "Ack"}; cId:`, cId);
             }, (e: Error) => {
               // TODO: Need retry mechanism, then notify client on failure
-              throw new Error("failed to forward event: " + e.message);
+              console.error(`[${socket.id}] failed to forward ${clientEventType}:`,
+                e.message);
             });
           });
         });
@@ -377,6 +397,8 @@ export class SignalingServer {
         routerRtpCapabilities: space.routerRtpCapabilities,
         clientSideSpace: getClientSideSpace(space),
       });
+      console.log(`[${socket.id}] sent memberEvent spaceInit; receivingMemberId:`,
+        memberId, "routerRtpCapabilities:", space.routerRtpCapabilities, "clientSideSpace:", getClientSideSpace(space));
       this.connections.get(socketId)!.memberId = memberId;
 
       // This map will be used to broadcast updates, and this insertion needs
@@ -386,6 +408,7 @@ export class SignalingServer {
     } catch (err: any) {
       console.log(err);
       socket.emit("connectionFailed", { message: "" });
+      console.log(`[${socket.id}] sent connectionFailed`);
     }
   }
 
@@ -580,6 +603,8 @@ export class SignalingServer {
           memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
         });
+        console.log(`[${socket.id}] sent memberEvent transportParams; memberId:`,
+          (payload.consumesFromMemberId ?? payload.memberId), "options:", payload.options);
 
         ack();
       } else if (type === "C:producerConnectedEvent") {

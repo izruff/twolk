@@ -221,6 +221,10 @@ export class TransportFactory {
 
     // Server needs to have its transport consume first
     const cId = getRandomUUID();
+    console.log("Emitting transportConsumerConsume:", {
+      rtpCapabilities: this._mediasoupDevice.rtpCapabilities,
+      sourceMemberId,
+    })
     this._socket.emit("transportConsumerConsume", {
       rtpCapabilities: this._mediasoupDevice.rtpCapabilities,
       sourceMemberId,

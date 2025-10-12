@@ -134,9 +134,20 @@ export type QueueResponseTypeMap = {
   };
   removeMemberRequest: void;
   unsubscribeFromSpaceRequest: void;
-  spaceUpdateStream: void;
-  // TODO: The `id` is for transportProducerProduce, we should generalize this later
-  transportUpdateStream: void | { id: string };
+  // The optional fields are populated for produce/consume responses so the
+  // signaling server can forward them to the client's ack.
+  spaceUpdateStream: void | {
+    id: string,
+    producerId?: string,
+    kind?: mediasoup.types.MediaKind,
+    rtpParameters?: mediasoup.types.RtpParameters,
+  };
+  transportUpdateStream: void | {
+    id: string,
+    producerId?: string,
+    kind?: mediasoup.types.MediaKind,
+    rtpParameters?: mediasoup.types.RtpParameters,
+  };
 }
 
 // Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
@@ -438,6 +449,10 @@ export class Coordinator {
 
   async _allocateTransport(router: Router, member: Member,
     consumesFromTransportId?: number): Promise<Transport> {
+    if (consumesFromTransportId !== undefined && !this.transports.has(consumesFromTransportId)) {
+      throw new Error("producing transport not found");
+    }
+
     // Create the transport object
     const id = this._getNewTransportId();
     const transport: Transport = {
@@ -446,7 +461,11 @@ export class Coordinator {
     };
     this.transports.set(id, transport);
     router.transports.set(id, transport);
-    member.producer = transport;
+    if (consumesFromTransportId === undefined) {
+      // Only a producer transport should be tracked as the member's producer;
+      // a consumer transport is tracked via memberToConsumerMap below.
+      member.producer = transport;
+    }
     console.log(`[${(new Date()).toISOString()}] Added unallocated transport ${id} (member=${member.id}, consumesFromTransportId=${consumesFromTransportId})`);
 
     // Return the transport once it is successfully allocated, or an error occurred
@@ -459,7 +478,14 @@ export class Coordinator {
       }, ({ options }) => {
         transport.metadata = { options };
         transport.status = "allocated";
+        if (consumesFromTransportId !== undefined) {
+          const producerTransport = this.transports.get(consumesFromTransportId)!;
+          member.memberToConsumerMap.set(producerTransport.owningMember.id,
+            this.transports.get(id)!);
+        }
         console.log(`[${(new Date()).toISOString()}] Transport ${id} allocated`);
+
+        resolve(transport);
 
         // TODO: Get list of all subscribed servers instead of just 0
         const spaceUuid = transport.owningRouter.owningSpace.uuid;
@@ -473,14 +499,11 @@ export class Coordinator {
               options: transport.metadata.options,
             },
           }, () => {
-            resolve(transport);
+            // Nothing for now
           }, (e: Error) => {
-            // Since this event is just a notification, we resolve anyway.
+            // Since this event is just a notification, we ignore for now.
             // TODO: Client should handle retry (implement in signaling server).
-            resolve(transport);
           });
-        } else {
-          resolve(transport);
         }
       }, (e: Error) => {
         // TODO: Need retry mechanism
@@ -647,17 +670,25 @@ export class Coordinator {
           this._allocateTransport(router, newMember, undefined)
             .then((newMemberTransport) => {
               newMember.producer = newMemberTransport;
-              // Then we allocate consumer transports for all other members
+              // For every other member in the space:
+              //  - allocate a consumer transport for them to consume from the
+              //    new member (worker will buffer the consume until the new
+              //    member's producer is actually producing).
+              //  - allocate a consumer transport for the new member to consume
+              //    from them (their producer may or may not be producing yet;
+              //    the worker buffer handles both cases).
               space.members.forEach((other) => {
-                if (other.id !== newMember.id) {
-                  this._allocateTransport(router, other, newMemberTransport.id)
-                    .then((transport) => {
-                      newMember.memberToConsumerMap.set(other.id, transport);
-                    })
+                if (other.id === newMember.id) return;
+                this._allocateTransport(router, other, newMemberTransport.id)
+                  .catch((e: any) => {
+                    console.log("failed to allocate consumer transport for " +
+                      `member ${other.id} consuming new member: ${e.message}`);
+                  });
+                if (other.producer !== null) {
+                  this._allocateTransport(router, newMember, other.producer.id)
                     .catch((e: any) => {
-                      // TODO: Handle errors; we can just let the client retry.
-                      console.log("failed to allocate consumer transport: " +
-                        e.message);
+                      console.log("failed to allocate consumer transport for " +
+                        `new member consuming member ${other.id}: ${e.message}`);
                     });
                 }
               });
@@ -778,7 +809,6 @@ export class Coordinator {
         }
 
       } else if (type === "S:memberProducerProduceEvent") {
-        console.log("Received S:memberProducerProduceEvent:", payload);
         const member = space.members.get(payload.memberId);
         if (member === undefined) {
           nack(new Error("member not found"));
@@ -790,7 +820,7 @@ export class Coordinator {
         //   nack(new Error("transport not connected"));
         //   return;
         // }
-        if (transport === null || transport.status == "unallocated") {
+        if (transport === null || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
@@ -803,9 +833,9 @@ export class Coordinator {
             kind: payload.data.kind,
             rtpParameters: payload.data.rtpParameters,
           },
-        }, () => {
+        }, (resp) => {
           console.log("Producer started for member", payload.memberId);
-          ack();
+          ack({ id: resp!.id });
           // Notify the space members about the new producer
           // TODO: Get list of all subscribed servers instead of just 0
           if (this._isSubscribedToSpace(0, uuid)) {
@@ -865,7 +895,6 @@ export class Coordinator {
         }
 
       } else if (type === "S:memberConsumerConsumeEvent") {
-        console.log("Received S:memberConsumerConsumeEvent:", payload);
         const member = space.members.get(payload.memberId);
         if (member === undefined) {
           nack(new Error("member not found"));
@@ -884,8 +913,7 @@ export class Coordinator {
         //   nack(new Error("transport not connected"));
         //   return;
         // }
-        console.log("S:memberConsumerConsumeEvent transport:", transport);
-        if (transport === undefined || transport.status == "unallocated") {
+        if (transport === undefined || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
@@ -898,8 +926,13 @@ export class Coordinator {
             rtpCapabilities: payload.data.rtpCapabilities,
             producingTransportId: sourceMember.producer!.id,  // This should exist
           },
-        }, () => {
-          ack();
+        }, (resp) => {
+          ack({
+            id: resp!.id,
+            producerId: resp!.producerId,
+            kind: resp!.kind,
+            rtpParameters: resp!.rtpParameters,
+          });
         }, (e: Error) => {
           // TODO: Need retry mechanism
           nack(new Error(
@@ -920,7 +953,7 @@ export class Coordinator {
         //   nack(new Error("transport not connected"));
         //   return;
         // }
-        if (transport === undefined || transport.status == "unallocated") {
+        if (transport === undefined || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
