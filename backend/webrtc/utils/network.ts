@@ -18,6 +18,10 @@ export async function getPublicIpAddress(): Promise<string> {
   if (cachedAnnouncedIp !== null) {
     return cachedAnnouncedIp;
   }
+  if (process.env.ANNOUNCED_IP) {
+    cachedAnnouncedIp = process.env.ANNOUNCED_IP;
+    return cachedAnnouncedIp;
+  }
   try {
     const response = await fetch("https://api.ipify.org?format=json");
     const data = await response.json();

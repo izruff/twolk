@@ -1,3 +1,9 @@
+try {
+  process.loadEnvFile();
+} catch {
+  // .env file is optional
+}
+
 import { SignalingServer } from "./server.ts";
 import { SfuWorker } from "./worker.ts";
 import { Coordinator } from "./coordinator.ts";
