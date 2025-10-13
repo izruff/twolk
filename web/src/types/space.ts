@@ -426,6 +426,11 @@ export class Space {
         } else {
           const consumerMember = new Member<ConsumerTransport>(data, state);
           this._consumerMembers.set(id, consumerMember);
+          for (const handler of this._consumerMemberEventHandlers) {
+            consumerMember.onEvent((event: MemberClientEventType) => {
+              handler(id, event);
+            });
+          }
         }
       });
       this._spaceInitReceived = true;

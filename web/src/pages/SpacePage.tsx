@@ -18,7 +18,8 @@ function SpacePage() {
   const audioContextResumeResolverRef = useRef<(() => void) | null>(null);
 
   const [producerAnalyzer, setProducerAnalyzer] = useState<AnalyserNode | null>(null);
-  const consumerAnalyzerRefs = useRef<Map<number, AnalyserNode | null>>(new Map());
+  const [consumerAnalyzers, setConsumerAnalyzers] = useState<Map<number, AnalyserNode>>(new Map());
+  const consumerAudioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
 
   const [userMediaTrack, setUserMediaTrack] = useState<MediaStreamTrack | null>(null);
 
@@ -30,6 +31,20 @@ function SpacePage() {
     { isMuted: false },
   );
   console.log("Space snapshot:", snapshot);
+
+  // Expose internals for e2e testing.
+  if (typeof window !== 'undefined') {
+    // @ts-expect-error attaching debug handle
+    window.__twolkDebug = {
+      space,
+      snapshot,
+      audioContext: audioContextRef.current,
+      producerAnalyzer,
+      consumerAnalyzers,
+      consumerAudioRefs: consumerAudioRefs.current,
+      userMediaTrack,
+    };
+  }
 
   function setUpAnalyzer(track: MediaStreamTrack) {
     const analyzer = audioContextRef.current.createAnalyser();
@@ -64,14 +79,31 @@ function SpacePage() {
         // Already handled by snapshot
       } else if (event === "transportReady") {
         const track = space.getConsumerTrack(memberId);
-        const analyzer = setUpAnalyzer(track);
 
-        if (consumerAnalyzerRefs.current.has(memberId)) {
-          consumerAnalyzerRefs.current.get(memberId)!.disconnect();
+        // Chrome won't pull RTP data into the Web Audio graph for a remote
+        // MediaStreamTrack unless the track is also attached to an
+        // HTMLMediaElement. Attach to a hidden audio element so the pipeline
+        // actually flows.
+        const stream = new MediaStream([track]);
+        const existingAudio = consumerAudioRefs.current.get(memberId);
+        if (existingAudio !== undefined) {
+          existingAudio.pause();
+          existingAudio.srcObject = null;
         }
-        consumerAnalyzerRefs.current.set(memberId, analyzer);
+        const audio = new Audio();
+        audio.autoplay = true;
+        audio.srcObject = stream;
+        audio.play().catch((err) => {
+          console.error("Failed to play consumer audio:", err);
+        });
+        consumerAudioRefs.current.set(memberId, audio);
 
-        analyzer.connect(audioContextRef.current.destination);
+        const analyzer = setUpAnalyzer(track);
+        setConsumerAnalyzers((prev) => {
+          const next = new Map(prev);
+          next.set(memberId, analyzer);
+          return next;
+        });
       } else {
         console.warn("Unknown consumer member event:", event);
       }
@@ -99,7 +131,14 @@ function SpacePage() {
         });
     });
 
-    return () => space.cleanup();
+    return () => {
+      space.cleanup();
+      consumerAudioRefs.current.forEach((audio) => {
+        audio.pause();
+        audio.srcObject = null;
+      });
+      consumerAudioRefs.current.clear();
+    };
   }, [space]);
 
   // Wait for user interaction to resume audio context
@@ -174,7 +213,7 @@ function SpacePage() {
                 analyzer={
                   id === snapshot.producer.id
                     ? producerAnalyzer
-                    : null
+                    : consumerAnalyzers.get(id) ?? null
                 }
               />
             </Grid.Col>
