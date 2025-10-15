@@ -490,12 +490,20 @@ export class Coordinator {
         // TODO: Get list of all subscribed servers instead of just 0
         const spaceUuid = transport.owningRouter.owningSpace.uuid;
         if (this._isSubscribedToSpace(0, spaceUuid)) {
+          let consumesFromMemberId: number | undefined = undefined;
+          if (transport.consumesFromTransportId !== undefined) {
+            const producingTransport = this.transports.get(
+              transport.consumesFromTransportId);
+            if (producingTransport !== undefined) {
+              consumesFromMemberId = producingTransport.owningMember.id;
+            }
+          }
           this.publish("spaceUpdateStream", {
             uuid: spaceUuid,
             type: "C:transportParamsEvent",
             payload: {
               memberId: transport.owningMember.id,
-              consumesFromMemberId: transport.consumesFromTransportId,
+              consumesFromMemberId,
               options: transport.metadata.options,
             },
           }, () => {

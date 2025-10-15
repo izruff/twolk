@@ -534,7 +534,7 @@ export class SignalingServer {
             space.members.forEach((_, otherId) => {
               if (otherId !== memberId && this.memberIdToSocket.has(otherId)) {
                 this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
-                  "memberLeave", memberId);
+                  "memberLeave", { memberId });
               }
             });
 
