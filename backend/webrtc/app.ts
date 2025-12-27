@@ -8,6 +8,7 @@ import { InProcessBus } from "./bus.ts";
 import { SignalingServer } from "./server.ts";
 import { SfuWorker } from "./worker.ts";
 import { Coordinator } from "./coordinator.ts";
+import { MediasoupMediaWorker } from "./media-mediasoup.ts";
 
 import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE } from "./utils/constants.ts";
 
@@ -34,7 +35,8 @@ const signalingServer = SignalingServer.create(
   3000,
   bus,
 );
-const sfuWorker = await SfuWorker.create(SFU_WORKER_PORT_RANGE, bus);
+const mediaWorker = await MediasoupMediaWorker.create(SFU_WORKER_PORT_RANGE);
+const sfuWorker = new SfuWorker(mediaWorker, bus);
 
 // Start the coordinator and worker before the signaling server so the
 // pipeline is ready before any client can connect.

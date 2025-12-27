@@ -5,56 +5,51 @@ Implementation of the SFU worker.
 - Routes RTP packets between clients in the same space.
 - Facilitates transport to other media-related workers.
 
+The worker no longer talks to mediasoup directly. Everything goes
+through the IMediaWorker / IMediaRouter / IMediaTransport / IMediaProducer
+/ IMediaConsumer port; the runtime implementation (currently mediasoup,
+eventually a hand-rolled SFU) is selected by the composition root.
+
 */
 
 import type { IMessageBus, QueueConsumerCallback, QueueResponseTypeMap } from "./bus.ts";
-import { getPublicIpAddress } from "./utils/network.ts";
-
-import mediasoup from "mediasoup";
-
-const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
-  {
-    kind: "audio",
-    mimeType: "audio/opus",
-    clockRate: 48000,
-    channels: 2,
-  },
-]
+import type {
+  IMediaWorker, IMediaRouter, IMediaTransport,
+  IMediaProducer, IMediaConsumer, RtpCapabilities,
+} from "./media-port.ts";
 
 
 interface Router {
   id: number;
-  mediasoupRouter: mediasoup.types.Router;
+  mediaRouter: IMediaRouter;
   webRtcProducerTransports: Map<number, WebRtcTransport>;
   webRtcConsumerTransports: Map<number, WebRtcTransport>;
-  webRtcProducers: Map<number, mediasoup.types.Producer>;
-  webRtcConsumers: Map<number, mediasoup.types.Consumer>;
+  webRtcProducers: Map<number, IMediaProducer>;
+  webRtcConsumers: Map<number, IMediaConsumer>;
   producerToConsumersSet: Map<number, Set<number>>;
 }
 
-interface Transport<T extends mediasoup.types.Transport> {
+interface WebRtcTransport {
   id: number;
-  mediasoupTransport: T;
+  mediaTransport: IMediaTransport;
   router: Router;
 }
-
-type WebRtcTransport = Transport<mediasoup.types.WebRtcTransport>;
 
 interface PendingConsume {
   consumerTransport: WebRtcTransport;
   producingTransport: WebRtcTransport;
-  rtpCapabilities: mediasoup.types.RtpCapabilities;
+  rtpCapabilities: RtpCapabilities;
   ack: (resp: QueueResponseTypeMap["transportUpdateStream"]) => void;
   nack: (e: Error) => void;
 }
 
 
 export class SfuWorker {
-  mediasoupWorker: mediasoup.types.Worker
+  mediaWorker: IMediaWorker
   bus: IMessageBus
 
   routers: Map<number, Router>
-  transports: Map<number, Transport<mediasoup.types.Transport>>
+  transports: Map<number, WebRtcTransport>
 
   // Consume requests received before the producing transport has a producer.
   // Keyed by producing transport id; flushed when that producer is created.
@@ -63,8 +58,8 @@ export class SfuWorker {
   // Cancellation handles for the bus subscriptions registered in start().
   _cancelConsumers: (() => void)[] = []
 
-  constructor(worker: mediasoup.types.Worker, bus: IMessageBus) {
-    this.mediasoupWorker = worker;
+  constructor(mediaWorker: IMediaWorker, bus: IMessageBus) {
+    this.mediaWorker = mediaWorker;
     this.bus = bus;
 
     this.routers = new Map();
@@ -72,24 +67,10 @@ export class SfuWorker {
     this.pendingConsumes = new Map();
   }
 
-  // Spawns the underlying mediasoup worker process but does not yet wire
-  // the bus or the death handler. Callers should follow up with start().
-  static async create(
-    rtcPortRange: { min: number, max: number },
-    bus: IMessageBus,
-  ) {
-    const worker = await mediasoup.createWorker({
-      rtcMinPort: rtcPortRange.min,
-      rtcMaxPort: rtcPortRange.max,
-    });
-
-    return new SfuWorker(worker, bus);
-  }
-
   // Wires the death handler and registers bus consumers. Must be called
   // once after construction; the worker is inert until then.
   start(onDied: (err: Error) => void) {
-    this.mediasoupWorker.on("died", onDied);
+    this.mediaWorker.onDied(onDied);
 
     this._cancelConsumers.push(
       this.bus.consume("newRouterRequest", this.onNewRouterRequest.bind(this)),
@@ -107,23 +88,21 @@ export class SfuWorker {
 
   // TODO: Refactor this so the router handles this logic instead of calling this
   // inside the transport update handler.
-  _attemptConsuming<T extends mediasoup.types.Transport>(
-    consumerTransport: Transport<T>, producerTransport: Transport<T>,
-    rtpCapabilities: mediasoup.types.RtpCapabilities): Promise<mediasoup.types.Consumer | null> {
-    // The mediasoup producer has to be already created, and needs to belong to
-    // the same router as consumerTransport. If not, return null so the caller
-    // can buffer the request until the producer is ready.
+  _attemptConsuming(
+    consumerTransport: WebRtcTransport,
+    producerTransport: WebRtcTransport,
+    rtpCapabilities: RtpCapabilities,
+  ): Promise<IMediaConsumer | null> {
+    // The producer has to be already created and belong to the same router
+    // as consumerTransport. If not, return null so the caller can buffer
+    // the request until the producer is ready.
     const router = consumerTransport.router;
     if (!router.webRtcProducers.has(producerTransport.id)) {
       return Promise.resolve(null);
     }
     const producer = router.webRtcProducers.get(producerTransport.id)!;
-    return consumerTransport.mediasoupTransport.consume({
-      producerId: producer.id,
-      rtpCapabilities,
-      // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
-      paused: true,
-    })
+    // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+    return consumerTransport.mediaTransport.consume(producer.id, rtpCapabilities, true)
       .then((consumer) => {
         router.webRtcConsumers.set(consumerTransport.id, consumer);
         // TODO: Handle events like "transportclose" and "producerclose"
@@ -133,7 +112,7 @@ export class SfuWorker {
 
   _consumeAndAck(consumerTransport: WebRtcTransport,
     producingTransport: WebRtcTransport,
-    rtpCapabilities: mediasoup.types.RtpCapabilities,
+    rtpCapabilities: RtpCapabilities,
     ack: (resp: QueueResponseTypeMap["transportUpdateStream"]) => void,
     nack: (e: Error) => void) {
     this._attemptConsuming(consumerTransport, producingTransport, rtpCapabilities)
@@ -156,12 +135,12 @@ export class SfuWorker {
     async ({ assignedId }, ack, nack) => {
       try {
         const router = await this.createRouter(assignedId);
-        ack({ rtpCapabilities: router.mediasoupRouter.rtpCapabilities });
+        ack({ rtpCapabilities: router.mediaRouter.rtpCapabilities });
       } catch (err: any) {
         nack(err);
       }
     }
-  
+
   onNewWebRtcTransportRequest: QueueConsumerCallback<"newWebRtcTransportRequest"> =
     async ({ routerId, assignedId, isProducer }, ack, nack) => {
       const router = this.routers.get(routerId);
@@ -171,26 +150,13 @@ export class SfuWorker {
       }
 
       try {
-        // Create the transport
-        const transportOptions: mediasoup.types.WebRtcTransportOptions = {
-          listenIps: [
-            {
-              ip: "0.0.0.0",
-              announcedIp: await getPublicIpAddress(),
-            }
-          ],
-          enableUdp: true,
-          enableTcp: true,
-          preferUdp: true,
-        };
-        const mediasoupTransport = await router.mediasoupRouter.createWebRtcTransport(
-          transportOptions);
+        const mediaTransport = await router.mediaRouter.createWebRtcTransport();
 
         // TODO: Handle events emitted by the transport
 
         // Register this transport
         const transport: WebRtcTransport = {
-          id: assignedId, mediasoupTransport, router
+          id: assignedId, mediaTransport, router,
         };
         this.transports.set(assignedId, transport);
         if (isProducer) {
@@ -199,14 +165,7 @@ export class SfuWorker {
           router.webRtcConsumerTransports.set(assignedId, transport);
         }
         // Send back the transport parameters
-        ack({
-          options: {
-            id: mediasoupTransport.id,
-            iceParameters: mediasoupTransport.iceParameters,
-            iceCandidates: mediasoupTransport.iceCandidates,
-            dtlsParameters: mediasoupTransport.dtlsParameters,
-          }
-        });
+        ack({ options: mediaTransport.params });
       } catch (err: any) {
         nack(err);
       }
@@ -221,17 +180,17 @@ export class SfuWorker {
         nack(new Error("transport not found"));
         return;
       }
-      
+
       if (type === "C:transportConnectEvent") {
         const { dtlsParameters } = payload;
-        transport.mediasoupTransport.connect({ dtlsParameters })
+        transport.mediaTransport.connect(dtlsParameters)
           .then(() => ack())
           .catch((err) => nack(err));
 
       } else if (type === "C:transportProducerProduceEvent") {
         console.log(`Received C:transportProducerProduceEvent from transport ${id}:`, payload);
         const { kind, rtpParameters } = payload;
-        transport.mediasoupTransport.produce({ kind, rtpParameters })
+        transport.mediaTransport.produce(kind, rtpParameters)
           .then((producer) => {
             transport.router.webRtcProducers.set(id, producer);
 
@@ -280,8 +239,8 @@ export class SfuWorker {
             this.pendingConsumes.set(producingTransportId, []);
           }
           this.pendingConsumes.get(producingTransportId)!.push({
-            consumerTransport: transport as WebRtcTransport,
-            producingTransport: producingTransport as WebRtcTransport,
+            consumerTransport: transport,
+            producingTransport: producingTransport,
             rtpCapabilities,
             ack,
             nack,
@@ -289,8 +248,7 @@ export class SfuWorker {
           return;
         }
 
-        this._consumeAndAck(transport as WebRtcTransport,
-          producingTransport as WebRtcTransport, rtpCapabilities, ack, nack);
+        this._consumeAndAck(transport, producingTransport, rtpCapabilities, ack, nack);
       } else if (type === "C:transportConsumerResumeEvent") {
         const consumer = transport.router.webRtcConsumers.get(id);
         if (consumer === undefined) {
@@ -308,11 +266,10 @@ export class SfuWorker {
     }
 
   async createRouter(assignedRouterId: number): Promise<Router> {
-    // TODO: Not sure what the router options should be
-    const mediasoupRouter = await this.mediasoupWorker.createRouter({ mediaCodecs: MEDIA_CODECS });
+    const mediaRouter = await this.mediaWorker.createRouter();
     const router: Router = {
       id: assignedRouterId,
-      mediasoupRouter,
+      mediaRouter,
       webRtcProducerTransports: new Map(),
       webRtcConsumerTransports: new Map(),
       webRtcProducers: new Map(),
@@ -323,4 +280,3 @@ export class SfuWorker {
     return router;
   }
 }
-
