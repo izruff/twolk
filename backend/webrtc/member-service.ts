@@ -21,6 +21,7 @@ import type { RouterAllocator } from "./router-allocator.ts";
 import type { TransportAllocator } from "./transport-allocator.ts";
 import type { SpaceService } from "./space-service.ts";
 import type { Member, MemberData, MemberState, Space } from "./domain.ts";
+import type { IStore } from "./store-port.ts";
 
 
 export class MemberService {
@@ -29,7 +30,7 @@ export class MemberService {
   routerAllocator: RouterAllocator
   transportAllocator: TransportAllocator
 
-  members: Map<number, Member> = new Map()
+  members: IStore<number, Member>
 
   _cancelConsumers: (() => void)[] = []
 
@@ -42,11 +43,13 @@ export class MemberService {
     spaceService: SpaceService,
     routerAllocator: RouterAllocator,
     transportAllocator: TransportAllocator,
+    memberStore: IStore<number, Member>,
   ) {
     this.bus = bus;
     this.spaceService = spaceService;
     this.routerAllocator = routerAllocator;
     this.transportAllocator = transportAllocator;
+    this.members = memberStore;
   }
 
   start() {

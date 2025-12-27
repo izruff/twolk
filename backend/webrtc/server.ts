@@ -31,6 +31,8 @@ import type {
   SpaceData, MemberData, MemberState, ClientSideSpace, ClientSideMember,
 } from "./domain.ts";
 import { MemberSession } from "./member-session.ts";
+import type { IStore } from "./store-port.ts";
+import { InMemoryStore } from "./in-memory-store.ts";
 
 import https from "node:https";
 import { Server as BaseServer, type ServerOptions } from "socket.io";
@@ -210,20 +212,24 @@ export class SignalingServer {
 
   memberIdToChannel: Map<number, Channel>
 
-  spaces: Map<string, Space>
-  members: Map<number, Member>
+  spaces: IStore<string, Space>
+  members: IStore<number, Member>
 
   // Cancellation handle for the bus subscription registered in start().
   _cancelConsumer: (() => void) | null = null
 
-  constructor(acceptor: Acceptor, bus: IMessageBus) {
+  constructor(
+    acceptor: Acceptor,
+    bus: IMessageBus,
+    spaceStore: IStore<string, Space>,
+    memberStore: IStore<number, Member>,
+  ) {
     this.acceptor = acceptor;
     this.bus = bus;
+    this.spaces = spaceStore;
+    this.members = memberStore;
 
     this.memberIdToChannel = new Map();
-
-    this.spaces = new Map();
-    this.members = new Map();
   }
 
   // Builds the underlying HTTPS + socket.io servers and the Socket.IO
@@ -235,7 +241,11 @@ export class SignalingServer {
     const httpsServer = https.createServer(httpsOptions);
     const io = new BaseServer(httpsServer, ioOptions);
     const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpsServer, port);
-    return new SignalingServer(acceptor, bus);
+    return new SignalingServer(
+      acceptor, bus,
+      new InMemoryStore<string, Space>(),
+      new InMemoryStore<number, Member>(),
+    );
   }
 
   // Wires the channel handler, binds the HTTPS port, and subscribes to

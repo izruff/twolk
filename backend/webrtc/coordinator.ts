@@ -27,6 +27,8 @@ import { TransportAllocator } from "./transport-allocator.ts";
 import { SpaceService } from "./space-service.ts";
 import { MemberService } from "./member-service.ts";
 import { SpaceUpdateDispatcher } from "./space-update-dispatcher.ts";
+import { InMemoryStore } from "./in-memory-store.ts";
+import type { Space, Member } from "./domain.ts";
 
 
 export class Coordinator {
@@ -46,14 +48,18 @@ export class Coordinator {
     // The "is this space subscribed?" check is supplied as a closure so
     // TransportAllocator can be built before SpaceService — resolved
     // lazily at call time once `this.spaceService` is set.
+    const spaceStore = new InMemoryStore<string, Space>();
+    const memberStore = new InMemoryStore<number, Member>();
+
     this.transportAllocator = new TransportAllocator(
       bus,
       (serverId, uuid) => this.spaceService.isSubscribed(serverId, uuid),
     );
     this.routerAllocator = new RouterAllocator(bus, this.transportAllocator);
-    this.spaceService = new SpaceService(bus, this.routerAllocator);
+    this.spaceService = new SpaceService(bus, this.routerAllocator, spaceStore);
     this.memberService = new MemberService(
-      bus, this.spaceService, this.routerAllocator, this.transportAllocator);
+      bus, this.spaceService, this.routerAllocator, this.transportAllocator,
+      memberStore);
     this.spaceUpdateDispatcher = new SpaceUpdateDispatcher(
       bus, this.spaceService, this.transportAllocator);
   }

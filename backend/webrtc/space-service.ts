@@ -23,22 +23,28 @@ import type {
 } from "./bus.ts";
 import type { RouterAllocator } from "./router-allocator.ts";
 import type { Space } from "./domain.ts";
+import type { IStore } from "./store-port.ts";
 
 
 export class SpaceService {
   bus: IMessageBus
   routerAllocator: RouterAllocator
 
-  spaces: Map<string, Space> = new Map()
+  spaces: IStore<string, Space>
 
   spaceSubscriptions: Map<number, Set<string>> = new Map()
   spaceToSubscribedMap: Map<string, Set<number>> = new Map()
 
   _cancelConsumers: (() => void)[] = []
 
-  constructor(bus: IMessageBus, routerAllocator: RouterAllocator) {
+  constructor(
+    bus: IMessageBus,
+    routerAllocator: RouterAllocator,
+    spaceStore: IStore<string, Space>,
+  ) {
     this.bus = bus;
     this.routerAllocator = routerAllocator;
+    this.spaces = spaceStore;
   }
 
   start() {
