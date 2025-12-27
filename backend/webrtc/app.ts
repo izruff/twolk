@@ -13,14 +13,13 @@ import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE } from "./utils/con
 
 import fs from "fs";
 
+// Composition root: construct everything first, then start each service.
+// Service constructors are side-effect-free; nothing listens or registers
+// handlers until start() is called.
+
 const bus = new InProcessBus();
-
-// Constructing the coordinator registers its consumers on the bus; the
-// variable isn't used elsewhere yet. Phase 2 will move this side-effect
-// into an explicit `start()`.
 const coordinator = new Coordinator(bus);
-
-const io = SignalingServer.create(
+const signalingServer = SignalingServer.create(
   {
     key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
     cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),
@@ -35,9 +34,10 @@ const io = SignalingServer.create(
   3000,
   bus,
 );
+const sfuWorker = await SfuWorker.create(SFU_WORKER_PORT_RANGE, bus);
 
-const worker = SfuWorker.create(
-  SFU_WORKER_PORT_RANGE,
-  bus,
-  (err) => { console.log(err); process.exit(1); }
-);
+// Start the coordinator and worker before the signaling server so the
+// pipeline is ready before any client can connect.
+coordinator.start();
+sfuWorker.start((err) => { console.log(err); process.exit(1); });
+signalingServer.start();

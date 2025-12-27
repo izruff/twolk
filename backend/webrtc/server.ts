@@ -224,6 +224,8 @@ function getClientSideMember(member: Member): ClientSideMember {
 
 export class SignalingServer {
   server: Server
+  httpsServer: https.Server
+  port: number
   bus: IMessageBus
 
   connections: Map<string, Connection>
@@ -232,8 +234,13 @@ export class SignalingServer {
   spaces: Map<string, Space>
   members: Map<number, Member>
 
-  constructor(server: Server, bus: IMessageBus) {
+  // Cancellation handle for the bus subscription registered in start().
+  _cancelConsumer: (() => void) | null = null
+
+  constructor(server: Server, httpsServer: https.Server, port: number, bus: IMessageBus) {
     this.server = server;
+    this.httpsServer = httpsServer;
+    this.port = port;
     this.bus = bus;
 
     this.connections = new Map();
@@ -241,10 +248,25 @@ export class SignalingServer {
 
     this.spaces = new Map();
     this.members = new Map();
+  }
 
+  // Builds the underlying HTTPS + socket.io servers but does not listen
+  // on the port yet — that happens in start(). Lets callers configure or
+  // swap collaborators before binding to the network.
+  static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
+    port: number, bus: IMessageBus): SignalingServer {
+    const httpsServer = https.createServer(httpsOptions);
+    const server: Server = new BaseServer(httpsServer, ioOptions);
+    return new SignalingServer(server, httpsServer, port, bus);
+  }
+
+  // Binds the HTTPS port, attaches the connection handler, and subscribes
+  // to coordinator updates. Must be called once after construction.
+  start() {
+    this.httpsServer.listen(this.port);
     this.server.on("connection", this.onConnection.bind(this));
-
-    this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
+    this._cancelConsumer = this.bus.consume(
+      "spaceUpdateStream", this.onSpaceUpdate.bind(this));
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
@@ -254,15 +276,6 @@ export class SignalingServer {
     //   console.log("Connections:", this.connections);
     //   console.log("MemberId to Socket Map:", this.memberIdToSocket);
     // }, 5000);
-  }
-
-  static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
-    port: number, bus: IMessageBus): SignalingServer {
-    const httpsServer = https.createServer(httpsOptions);
-    httpsServer.listen(port);
-
-    const server: Server = new BaseServer(httpsServer, ioOptions);
-    return new SignalingServer(server, bus);
   }
 
   _addSpace(uuid: string, data: SpaceData,

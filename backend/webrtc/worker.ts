@@ -60,6 +60,9 @@ export class SfuWorker {
   // Keyed by producing transport id; flushed when that producer is created.
   pendingConsumes: Map<number, PendingConsume[]>
 
+  // Cancellation handles for the bus subscriptions registered in start().
+  _cancelConsumers: (() => void)[] = []
+
   constructor(worker: mediasoup.types.Worker, bus: IMessageBus) {
     this.mediasoupWorker = worker;
     this.bus = bus;
@@ -67,10 +70,32 @@ export class SfuWorker {
     this.routers = new Map();
     this.transports = new Map();
     this.pendingConsumes = new Map();
+  }
 
-    this.bus.consume("newRouterRequest", this.onNewRouterRequest.bind(this));
-    this.bus.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this));
-    this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+  // Spawns the underlying mediasoup worker process but does not yet wire
+  // the bus or the death handler. Callers should follow up with start().
+  static async create(
+    rtcPortRange: { min: number, max: number },
+    bus: IMessageBus,
+  ) {
+    const worker = await mediasoup.createWorker({
+      rtcMinPort: rtcPortRange.min,
+      rtcMaxPort: rtcPortRange.max,
+    });
+
+    return new SfuWorker(worker, bus);
+  }
+
+  // Wires the death handler and registers bus consumers. Must be called
+  // once after construction; the worker is inert until then.
+  start(onDied: (err: Error) => void) {
+    this.mediasoupWorker.on("died", onDied);
+
+    this._cancelConsumers.push(
+      this.bus.consume("newRouterRequest", this.onNewRouterRequest.bind(this)),
+      this.bus.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this)),
+      this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this)),
+    );
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
@@ -78,21 +103,6 @@ export class SfuWorker {
     //   console.log("Routers:", this.routers);
     //   console.log("Transports:", this.transports);
     // }, 5000);
-  }
-
-  static async create(
-    rtcPortRange: { min: number, max: number },
-    bus: IMessageBus,
-    onDied: (err: Error) => void,
-  ) {
-    const worker = await mediasoup.createWorker({
-      rtcMinPort: rtcPortRange.min,
-      rtcMaxPort: rtcPortRange.max,
-    });
-
-    worker.on("died", onDied);
-
-    return new SfuWorker(worker, bus);
   }
 
   // TODO: Refactor this so the router handles this logic instead of calling this

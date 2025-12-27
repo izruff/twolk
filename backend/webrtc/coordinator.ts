@@ -102,6 +102,9 @@ export class Coordinator {
   spaceSubscriptions: Map<number, Set<string>>
   spaceToSubscribedMap: Map<string, Set<number>>
 
+  // Cancellation handles for the bus subscriptions registered in start().
+  _cancelConsumers: (() => void)[] = []
+
 
   // These should be okay because these resources are not permanent and the
   // traffic should not exceed this maximum limit.
@@ -120,13 +123,19 @@ export class Coordinator {
 
     this.spaceSubscriptions = new Map();
     this.spaceToSubscribedMap = new Map();
+  }
 
-    this.bus.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this));
-    this.bus.consume("addMemberRequest", this.onAddMemberRequest.bind(this));
-    this.bus.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this));
-    this.bus.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this));
-    this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
-    this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+  // Registers bus consumers. Must be called once after construction;
+  // the coordinator is inert until then.
+  start() {
+    this._cancelConsumers.push(
+      this.bus.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this)),
+      this.bus.consume("addMemberRequest", this.onAddMemberRequest.bind(this)),
+      this.bus.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this)),
+      this.bus.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this)),
+      this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this)),
+      this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this)),
+    );
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
