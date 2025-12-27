@@ -4,6 +4,13 @@ Implementation for the WebSocket signaling server.
 - Maintains connection with client and updates state changes in the space.
 - Communicates with the coordinator on client join events.
 
+The server no longer talks to Socket.IO directly. New connections come in
+as `IClientChannel` instances from an `IClientChannelAcceptor`; per-channel
+state (join handshake, listeners, lifetime) is owned by `MemberSession`.
+The server itself keeps the cross-channel mirror of coordinator state
+(spaces, members) plus the `memberId → channel` registry used for
+outbound broadcasts.
+
 In the future, there should be another service to allow scaling these
 horizontally and manage communication between servers.
 
@@ -14,14 +21,19 @@ to worry about race conditions and order of operations too much.
 */
 
 import type {
-  IMessageBus, QueueConsumerCallback, SpaceUpdateSTypes
+  IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
 import type {
-  SpaceData, MemberData, MemberState, ClientSideSpace, ClientSideMember
+  IClientChannel, IClientChannelAcceptor,
+} from "./client-channel-port.ts";
+import { SocketIoChannelAcceptor } from "./client-channel-socketio.ts";
+import type {
+  SpaceData, MemberData, MemberState, ClientSideSpace, ClientSideMember,
 } from "./domain.ts";
+import { MemberSession } from "./member-session.ts";
 
 import https from "node:https";
-import { Server as BaseServer, Socket as BaseSocket, type ServerOptions } from "socket.io";
+import { Server as BaseServer, type ServerOptions } from "socket.io";
 import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
 
@@ -29,12 +41,12 @@ import mediasoupClient from "mediasoup-client";
 interface Member {
   id: number;
   owningSpace: Space;
-  
+
   data: MemberData;
   state: MemberState;
 }
 
-interface Space {
+export interface Space {
   uuid: string;
   data: SpaceData;
   members: Map<number, Member>;
@@ -78,7 +90,7 @@ interface SpaceWideEventContentMap extends Record<SpaceWideEventType, any> {
 }
 
 
-interface ServerToClientEvents {
+export interface ServerToClientEvents {
 
   connectionSuccessful: () => void;
 
@@ -112,9 +124,7 @@ interface ServerToClientEvents {
 }
 
 
-interface ClientToServerEvents {
-
-  disconnect: () => void;
+export interface ClientToServerEvents {
 
   // This is for client-side checks/retries
   createWebRtcTransport: (
@@ -171,39 +181,11 @@ interface ClientToServerEvents {
 }
 
 
-interface InterServerEvents {
-  // nothing here
-}
+type Channel = IClientChannel<ClientToServerEvents, ServerToClientEvents>;
+type Acceptor = IClientChannelAcceptor<ClientToServerEvents, ServerToClientEvents>;
 
 
-interface SocketData {
-  spaceUuid: string;
-  memberData: MemberData;
-}
-
-
-type Server = BaseServer<ClientToServerEvents, ServerToClientEvents,
-  InterServerEvents, SocketData>;
-
-type Socket = BaseSocket<ClientToServerEvents, ServerToClientEvents>;
-
-interface Connection {
-  socket: Socket;
-  memberId?: number;
-}
-
-
-const FORWARD_AND_ACK_LISTEN_EVENTS_MAP: Map<keyof ClientToServerEvents,
-  SpaceUpdateSTypes> = new Map([
-    ["transportProducerConnect", "S:memberProducerConnectEvent"],
-    ["transportProducerProduce", "S:memberProducerProduceEvent"],
-    ["transportConsumerConnect", "S:memberConsumerConnectEvent"],
-    ["transportConsumerConsume", "S:memberConsumerConsumeEvent"],
-    ["transportConsumerResume", "S:memberConsumerResumeEvent"],
-  ]);
-
-
-function getClientSideSpace(space: Space): ClientSideSpace {
+export function getClientSideSpace(space: Space): ClientSideSpace {
   const clientSideMembers = Array.from(space.members.values()).map(
     (member) => getClientSideMember(member));
   return {
@@ -223,13 +205,10 @@ function getClientSideMember(member: Member): ClientSideMember {
 
 
 export class SignalingServer {
-  server: Server
-  httpsServer: https.Server
-  port: number
+  acceptor: Acceptor
   bus: IMessageBus
 
-  connections: Map<string, Connection>
-  memberIdToSocket: Map<number, Socket>
+  memberIdToChannel: Map<number, Channel>
 
   spaces: Map<string, Space>
   members: Map<number, Member>
@@ -237,34 +216,37 @@ export class SignalingServer {
   // Cancellation handle for the bus subscription registered in start().
   _cancelConsumer: (() => void) | null = null
 
-  constructor(server: Server, httpsServer: https.Server, port: number, bus: IMessageBus) {
-    this.server = server;
-    this.httpsServer = httpsServer;
-    this.port = port;
+  constructor(acceptor: Acceptor, bus: IMessageBus) {
+    this.acceptor = acceptor;
     this.bus = bus;
 
-    this.connections = new Map();
-    this.memberIdToSocket = new Map();
+    this.memberIdToChannel = new Map();
 
     this.spaces = new Map();
     this.members = new Map();
   }
 
-  // Builds the underlying HTTPS + socket.io servers but does not listen
-  // on the port yet — that happens in start(). Lets callers configure or
-  // swap collaborators before binding to the network.
+  // Builds the underlying HTTPS + socket.io servers and the Socket.IO
+  // channel acceptor but does not listen on the port yet — that happens
+  // in start(). Lets callers configure or swap collaborators before
+  // binding to the network.
   static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
     port: number, bus: IMessageBus): SignalingServer {
     const httpsServer = https.createServer(httpsOptions);
-    const server: Server = new BaseServer(httpsServer, ioOptions);
-    return new SignalingServer(server, httpsServer, port, bus);
+    const io = new BaseServer(httpsServer, ioOptions);
+    const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpsServer, port);
+    return new SignalingServer(acceptor, bus);
   }
 
-  // Binds the HTTPS port, attaches the connection handler, and subscribes
-  // to coordinator updates. Must be called once after construction.
+  // Wires the channel handler, binds the HTTPS port, and subscribes to
+  // coordinator updates. Must be called once after construction.
   start() {
-    this.httpsServer.listen(this.port);
-    this.server.on("connection", this.onConnection.bind(this));
+    this.acceptor.onChannel((channel) => {
+      const session = new MemberSession(channel, this.bus, this);
+      session.start();
+    });
+    this.acceptor.start();
+
     this._cancelConsumer = this.bus.consume(
       "spaceUpdateStream", this.onSpaceUpdate.bind(this));
 
@@ -273,8 +255,7 @@ export class SignalingServer {
     //   console.log("=== Signaling Server State ===");
     //   console.log("Spaces:", this.spaces);
     //   console.log("Members:", this.members);
-    //   console.log("Connections:", this.connections);
-    //   console.log("MemberId to Socket Map:", this.memberIdToSocket);
+    //   console.log("MemberId to Channel Map:", this.memberIdToChannel);
     // }, 5000);
   }
 
@@ -309,121 +290,19 @@ export class SignalingServer {
     }
   }
 
-  async onConnection(socket: Socket) {
-    console.log(`[${socket.id}] connected`);
+  // Called by MemberSession after a successful prepareMember + spaceInit
+  // emission, atomically with the spaceInit so no broadcast is missed.
+  registerChannel(memberId: number, channel: Channel) {
+    this.memberIdToChannel.set(memberId, channel);
+  }
 
-    this.connections.set(socket.id, { socket });
+  // Called by MemberSession on channel close. Idempotent.
+  unregisterChannel(memberId: number) {
+    this.memberIdToChannel.delete(memberId);
+  }
 
-    socket.on("disconnect", () => {
-      console.log(`[${socket.id}] disconnected`);
-
-      const memberId = this.connections.get(socket.id)!.memberId;
-      if (memberId !== undefined) {
-        this.memberIdToSocket.delete(memberId);
-        this.deleteMember(memberId);
-      }
-      this.connections.delete(socket.id);
-    })
-
-    // Prepare space and member
-    const { spaceUuid, memberData, memberState } =
-      socket.handshake.auth as {
-        spaceUuid: string,
-        memberData: MemberData,
-        memberState: MemberState,
-      };
-    const socketId = socket.id;
-    try {
-      await this.prepareSpace(spaceUuid);
-      socket.emit("connectionSuccessful");
-      console.log(`[${socket.id}] sent connectionSuccessful`);
-
-      const memberId = await this.prepareMember(spaceUuid, socketId,
-        memberData, {
-          ...memberState,
-          transportIsConnected: false,
-        });
-
-      const space = this.spaces.get(spaceUuid)!;
-
-      // Start listening to WebSocket messages
-
-      socket.on("createWebRtcTransport", async ({ consumesFromMemberId }, cId) => {
-        // TODO: We're supposed to let the coordinator know to check if the
-        // transport is being processed, and start processing if not.
-      })
-
-      socket.on("resendSpaceInit", async (cId) => {
-        // TODO: Handle this; we don't need to tell the coordinator.
-      })
-
-      socket.on("updateMemberState", async ({ newState }, cId) => {
-        console.log(`[${socket.id}] received updateMemberState; newState:`, newState, "cId:", cId);
-        try {
-          this.updateMember(memberId, newState);
-          socket.emit("updateMemberStateAck", cId);
-          console.log(`[${socket.id}] sent updateMemberStateAck; cId:`, cId);
-        } catch (err: any) {
-          // TODO: Need to handle failure properly
-          socket.emit("updateMemberStateAck", cId);
-          console.log(`[${socket.id}] sent updateMemberStateAck; cId:`, cId);
-        }
-      });
-
-      // For all these message types, the signaling server simply forwards it
-      // to the coordinator.
-      FORWARD_AND_ACK_LISTEN_EVENTS_MAP.forEach((spaceUpdateType,
-        clientEventType) => {
-          // TODO: We probably should change the way we implement typing here
-          // @ts-ignore ('data' implicitly has 'any' type)
-          socket.on(clientEventType, async (data, cId) => {
-            console.log(`[${socket.id}] received ${clientEventType}; data:`, data, "cId:", cId);
-            this.bus.publish("spaceUpdateStream", {
-              uuid: spaceUuid,
-              type: spaceUpdateType,
-              payload: { memberId, data },
-            }, (resp) => {
-              // Acknowledge to the client. Produce/consume require extra
-              // fields from the response to set up the client-side
-              // producer/consumer object.
-              if (clientEventType === "transportProducerProduce") {
-                socket.emit("transportProducerProduceAck", cId, resp!.id);
-              } else if (clientEventType === "transportConsumerConsume") {
-                socket.emit("transportConsumerConsumeAck", cId,
-                  resp!.id, resp!.producerId!, resp!.kind!, resp!.rtpParameters!);
-              } else {
-                socket.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
-              }
-              console.log(`[${socket.id}] sent ${clientEventType + "Ack"}; cId:`, cId);
-            }, (e: Error) => {
-              // TODO: Need retry mechanism, then notify client on failure
-              console.error(`[${socket.id}] failed to forward ${clientEventType}:`,
-                e.message);
-            });
-          });
-        });
-
-      // This message also serves as confirmation that the client can start
-      // sending messages back to the server.
-      console.log(`Member ${memberId} successfully joined space ${spaceUuid}`);
-      socket.emit("memberEvent", "spaceInit", {
-        receivingMemberId: memberId,
-        routerRtpCapabilities: space.routerRtpCapabilities,
-        clientSideSpace: getClientSideSpace(space),
-      });
-      console.log(`[${socket.id}] sent memberEvent spaceInit; receivingMemberId:`,
-        memberId, "routerRtpCapabilities:", space.routerRtpCapabilities, "clientSideSpace:", getClientSideSpace(space));
-      this.connections.get(socketId)!.memberId = memberId;
-
-      // This map will be used to broadcast updates, and this insertion needs
-      // to be performed with the memberEvent emission atomically; we want to
-      // make sure no updates are missed.
-      this.memberIdToSocket.set(memberId, socket);
-    } catch (err: any) {
-      console.log(err);
-      socket.emit("connectionFailed", { message: "" });
-      console.log(`[${socket.id}] sent connectionFailed`);
-    }
+  getSpace(uuid: string): Space | undefined {
+    return this.spaces.get(uuid);
   }
 
   async prepareSpace(uuid: string): Promise<void> {
@@ -457,15 +336,10 @@ export class SignalingServer {
     return promise;
   }
 
-  async prepareMember(spaceUuid: string, socketId: string,
+  async prepareMember(spaceUuid: string,
     memberData: MemberData, memberState: MemberState): Promise<number> {
-    if (!this.connections.has(socketId) || !this.spaces.has(spaceUuid)) {
-      throw new Error("socket not found");
-    }
-    if (this.connections.get(socketId)!.memberId !== undefined) {
-      // This should not happen since prepareMember is called only once
-      console.log("warning: member already exists when calling prepareMember");
-      return Promise.resolve(this.connections.get(socketId)!.memberId!);
+    if (!this.spaces.has(spaceUuid)) {
+      throw new Error("space not found");
     }
 
     const promise = new Promise<number>((resolve) => {
@@ -480,12 +354,12 @@ export class SignalingServer {
           } else {
             const member = this._addMember(id, space, memberData, memberState);
 
-            // Notify other members in the space (whose sockets we own)
+            // Notify other members in the space (whose channels we own)
             // This new member will not receive this and instead will get the
             // spaceInit member event.
             space.members.forEach((_, otherId) => {
-              if (otherId !== id && this.memberIdToSocket.has(otherId)) {
-                this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
+              if (otherId !== id && this.memberIdToChannel.has(otherId)) {
+                this.memberIdToChannel.get(otherId)!.emit("spaceWideEvent",
                   "memberJoin", { member: getClientSideMember(member) });
               }
             });
@@ -516,11 +390,11 @@ export class SignalingServer {
     }
     member.state = { ...member.state, ...update };
 
-    // Notify all members in the space (whose sockets we own)
+    // Notify all members in the space (whose channels we own)
     member.owningSpace.members.forEach((_, id) => {
-      if (this.memberIdToSocket.has(id)) {
+      if (this.memberIdToChannel.has(id)) {
         console.log("Notifying member", id, "about state update of member", memberId);
-        this.memberIdToSocket.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
+        this.memberIdToChannel.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
           memberId, newState: member.state
         });
       }
@@ -542,12 +416,12 @@ export class SignalingServer {
             const space = this.members.get(memberId)!.owningSpace;
             this._removeMember(memberId);
 
-            // Notify other members in the space (whose sockets we own)
+            // Notify other members in the space (whose channels we own)
             // This member will not receive this and the client should
             // disconnect on its own.
             space.members.forEach((_, otherId) => {
-              if (otherId !== memberId && this.memberIdToSocket.has(otherId)) {
-                this.memberIdToSocket.get(otherId)!.emit("spaceWideEvent",
+              if (otherId !== memberId && this.memberIdToChannel.has(otherId)) {
+                this.memberIdToChannel.get(otherId)!.emit("spaceWideEvent",
                   "memberLeave", { memberId });
               }
             });
@@ -605,31 +479,25 @@ export class SignalingServer {
       }
 
       if (type === "C:transportParamsEvent") {
-        const socket = this.memberIdToSocket.get(payload.memberId);
-        if (socket === undefined) {
-          nack(new Error("socket not found"));
+        const channel = this.memberIdToChannel.get(payload.memberId);
+        if (channel === undefined) {
+          nack(new Error("channel not found"));
           return;
         }
 
         // Pass the transport parameters to the client
         // Send own memberId if producer, else send consumesFromMemberId
-        socket.emit("memberEvent", "transportParams", {
+        channel.emit("memberEvent", "transportParams", {
           memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
         });
-        console.log(`[${socket.id}] sent memberEvent transportParams; memberId:`,
+        console.log(`[${channel.id}] sent memberEvent transportParams; memberId:`,
           (payload.consumesFromMemberId ?? payload.memberId), "options:", payload.options);
 
         ack();
       } else if (type === "C:producerConnectedEvent") {
         try {
           this.updateMember(payload.memberId, { transportIsConnected: true });
-          // Notify all other members that they can start consuming
-          // space.members.forEach((_, id) => {
-          //   if (id !== payload.memberId) {
-              
-          //   }
-          // });
         } catch (err: any) {
           nack(err);
           return;
