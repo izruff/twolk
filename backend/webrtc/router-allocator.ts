@@ -15,27 +15,24 @@ removed router are released.
 import type { IMessageBus } from "./bus.ts";
 import type { Router, Space } from "./domain.ts";
 import type { TransportAllocator } from "./transport-allocator.ts";
+import type { IIdGenerator } from "./id-gen-port.ts";
 
 
 export class RouterAllocator {
   bus: IMessageBus
   transportAllocator: TransportAllocator
+  idGen: IIdGenerator
 
   routers: Map<number, Router> = new Map()
 
-  // TODO: Phase 7 replaces these statics with an injected IIdGenerator.
-  static MAX_COUNTER = Number.MAX_SAFE_INTEGER
-  static _idCounter = 0
-
-  constructor(bus: IMessageBus, transportAllocator: TransportAllocator) {
+  constructor(
+    bus: IMessageBus,
+    transportAllocator: TransportAllocator,
+    idGen: IIdGenerator,
+  ) {
     this.bus = bus;
     this.transportAllocator = transportAllocator;
-  }
-
-  _getNewId() {
-    const id = RouterAllocator._idCounter;
-    RouterAllocator._idCounter = (RouterAllocator._idCounter + 1) % RouterAllocator.MAX_COUNTER;
-    return id;
+    this.idGen = idGen;
   }
 
   get(routerId: number): Router | undefined {
@@ -50,7 +47,7 @@ export class RouterAllocator {
       return space.primaryRouter;
     }
 
-    const id = this._getNewId();
+    const id = this.idGen.next();
     const router: Router = {
       id, owningSpace: space,
       rtpCapabilities: null,

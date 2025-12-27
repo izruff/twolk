@@ -17,33 +17,29 @@ substituted by passing its `isSubscribed` method.
 
 import type { IMessageBus } from "./bus.ts";
 import type { Member, Router, Transport } from "./domain.ts";
+import type { IIdGenerator } from "./id-gen-port.ts";
 
 
 export class TransportAllocator {
   bus: IMessageBus
-  // TODO: Replace this callback with a direct SpaceService dependency once
-  // SpaceService exists. The 0 below is also a placeholder server id;
-  // Phase 7 will plumb real server ids.
-  isSpaceSubscribed: (serverId: number, spaceUuid: string) => boolean
+  // Whether any signaling server is subscribed to this space — if so, the
+  // C:transportParamsEvent broadcast goes out (and any subscribed server
+  // will pick it up via its consume on spaceUpdateStream). Supplied as a
+  // callback to avoid a direct dependency on SpaceService.
+  hasSpaceSubscribers: (spaceUuid: string) => boolean
+
+  idGen: IIdGenerator
 
   transports: Map<number, Transport> = new Map()
 
-  // TODO: Phase 7 replaces these statics with an injected IIdGenerator.
-  static MAX_COUNTER = Number.MAX_SAFE_INTEGER
-  static _idCounter = 0
-
   constructor(
     bus: IMessageBus,
-    isSpaceSubscribed: (serverId: number, spaceUuid: string) => boolean,
+    hasSpaceSubscribers: (spaceUuid: string) => boolean,
+    idGen: IIdGenerator,
   ) {
     this.bus = bus;
-    this.isSpaceSubscribed = isSpaceSubscribed;
-  }
-
-  _getNewId() {
-    const id = TransportAllocator._idCounter;
-    TransportAllocator._idCounter = (TransportAllocator._idCounter + 1) % TransportAllocator.MAX_COUNTER;
-    return id;
+    this.hasSpaceSubscribers = hasSpaceSubscribers;
+    this.idGen = idGen;
   }
 
   get(transportId: number): Transport | undefined {
@@ -59,7 +55,7 @@ export class TransportAllocator {
       throw new Error("producing transport not found");
     }
 
-    const id = this._getNewId();
+    const id = this.idGen.next();
     const transport: Transport = {
       id, owningRouter: router, owningMember: member,
       consumesFromTransportId, status: "unallocated",
@@ -91,9 +87,8 @@ export class TransportAllocator {
 
         resolve(transport);
 
-        // TODO: Get list of all subscribed servers instead of just 0
         const spaceUuid = transport.owningRouter.owningSpace.uuid;
-        if (this.isSpaceSubscribed(0, spaceUuid)) {
+        if (this.hasSpaceSubscribers(spaceUuid)) {
           let consumesFromMemberId: number | undefined = undefined;
           if (transport.consumesFromTransportId !== undefined) {
             const producingTransport = this.transports.get(

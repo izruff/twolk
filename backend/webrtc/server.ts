@@ -207,6 +207,7 @@ function getClientSideMember(member: Member): ClientSideMember {
 
 
 export class SignalingServer {
+  serverId: number
   acceptor: Acceptor
   bus: IMessageBus
 
@@ -219,11 +220,13 @@ export class SignalingServer {
   _cancelConsumer: (() => void) | null = null
 
   constructor(
+    serverId: number,
     acceptor: Acceptor,
     bus: IMessageBus,
     spaceStore: IStore<string, Space>,
     memberStore: IStore<number, Member>,
   ) {
+    this.serverId = serverId;
     this.acceptor = acceptor;
     this.bus = bus;
     this.spaces = spaceStore;
@@ -236,13 +239,13 @@ export class SignalingServer {
   // channel acceptor but does not listen on the port yet — that happens
   // in start(). Lets callers configure or swap collaborators before
   // binding to the network.
-  static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
-    port: number, bus: IMessageBus): SignalingServer {
+  static create(serverId: number, httpsOptions: https.ServerOptions,
+    ioOptions: Partial<ServerOptions>, port: number, bus: IMessageBus): SignalingServer {
     const httpsServer = https.createServer(httpsOptions);
     const io = new BaseServer(httpsServer, ioOptions);
     const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpsServer, port);
     return new SignalingServer(
-      acceptor, bus,
+      serverId, acceptor, bus,
       new InMemoryStore<string, Space>(),
       new InMemoryStore<number, Member>(),
     );
@@ -321,7 +324,7 @@ export class SignalingServer {
     }
 
     const promise = new Promise<void>((resolve) => {
-      this.bus.publish("subscribeToSpaceRequest", { uuid },
+      this.bus.publish("subscribeToSpaceRequest", { serverId: this.serverId, uuid },
         ({ clientSideSpace, routerRtpCapabilities }) => {
           if (!this.spaces.has(uuid)) {
             // Create the space and existing members object
@@ -354,7 +357,7 @@ export class SignalingServer {
 
     const promise = new Promise<number>((resolve) => {
       this.bus.publish("addMemberRequest", {
-        spaceUuid, memberData, memberState
+        serverId: this.serverId, spaceUuid, memberData, memberState
       }, ({ id }) => {
         if (!this.members.has(id)) {
           const space = this.spaces.get(spaceUuid);
@@ -464,7 +467,7 @@ export class SignalingServer {
 
     const promise = new Promise<void>((resolve) => {
       this.bus.publish("unsubscribeFromSpaceRequest",
-        { uuid: spaceUuid },
+        { serverId: this.serverId, uuid: spaceUuid },
         () => {
           this._removeSpace(spaceUuid);
           resolve();

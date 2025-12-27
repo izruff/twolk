@@ -38,9 +38,11 @@ export type QueuePayloadTypeMap = {
     isProducer: boolean,
   };
   subscribeToSpaceRequest: {
+    serverId: number,
     uuid: string,
   };
   addMemberRequest: {
+    serverId: number,
     spaceUuid: string,
     memberData: MemberData,
     memberState: MemberState,
@@ -49,6 +51,7 @@ export type QueuePayloadTypeMap = {
     id: number,
   }
   unsubscribeFromSpaceRequest: {
+    serverId: number,
     uuid: string,
   };
   spaceUpdateStream: { uuid: string } & {

@@ -126,7 +126,7 @@ export class SpaceService {
   }
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
-    ({ uuid }, ack, nack) => {
+    ({ serverId, uuid }, ack, nack) => {
       // Callback function to subscribe and ack after the space is ready
       const subscribeAndAckFn = () => {
         const space = this.spaces.get(uuid)!;
@@ -137,8 +137,7 @@ export class SpaceService {
             nack(new Error("space router not allocated yet"));
             return;
           }
-        // TODO: Replace 0 with actual signaling server ID
-        this.subscribe(0, uuid);
+        this.subscribe(serverId, uuid);
 
         // Deep-copy the objects instead of sharing reference (only because
         // we are simulating everything in one process).
@@ -180,15 +179,14 @@ export class SpaceService {
     }
 
   onUnsubscribeFromSpaceRequest: QueueConsumerCallback<"unsubscribeFromSpaceRequest"> =
-    ({ uuid }, ack, nack) => {
+    ({ serverId, uuid }, ack, nack) => {
       const space = this.spaces.get(uuid);
       if (space === undefined) {
         nack(new Error("space not found"));
         return;
       }
 
-      // TODO: Replace 0 with actual signaling server ID
-      this.unsubscribe(0, uuid);
+      this.unsubscribe(serverId, uuid);
 
       // Clean up space if it has met ending conditions and no server is
       // subscribed to it.

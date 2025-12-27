@@ -117,9 +117,10 @@ export class SpaceUpdateDispatcher {
         }, (resp) => {
           console.log("Producer started for member", payload.memberId);
           ack({ id: resp!.id });
-          // Notify the space members about the new producer
-          // TODO: Get list of all subscribed servers instead of just 0
-          if (this.spaceService.isSubscribed(0, uuid)) {
+          // Notify the space members about the new producer. Any
+          // subscribed signaling server will pick this up from its
+          // consume on spaceUpdateStream.
+          if (this.spaceService.hasSubscribers(uuid)) {
             console.log("Notifying space members about new producer for member", payload.memberId);
             this.bus.publish("spaceUpdateStream", {
               uuid,

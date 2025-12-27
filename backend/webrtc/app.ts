@@ -18,9 +18,14 @@ import fs from "fs";
 // Service constructors are side-effect-free; nothing listens or registers
 // handlers until start() is called.
 
+// Only one signaling server today; future work picks the id from
+// config or generates it (see Phase 7 in PLANS.md).
+const SERVER_ID = 0;
+
 const bus = new InProcessBus();
 const coordinator = new Coordinator(bus);
 const signalingServer = SignalingServer.create(
+  SERVER_ID,
   {
     key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
     cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),

@@ -22,6 +22,7 @@ import type { TransportAllocator } from "./transport-allocator.ts";
 import type { SpaceService } from "./space-service.ts";
 import type { Member, MemberData, MemberState, Space } from "./domain.ts";
 import type { IStore } from "./store-port.ts";
+import type { IIdGenerator } from "./id-gen-port.ts";
 
 
 export class MemberService {
@@ -29,14 +30,11 @@ export class MemberService {
   spaceService: SpaceService
   routerAllocator: RouterAllocator
   transportAllocator: TransportAllocator
+  idGen: IIdGenerator
 
   members: IStore<number, Member>
 
   _cancelConsumers: (() => void)[] = []
-
-  // TODO: Phase 7 replaces these statics with an injected IIdGenerator.
-  static MAX_COUNTER = Number.MAX_SAFE_INTEGER
-  static _idCounter = 0
 
   constructor(
     bus: IMessageBus,
@@ -44,12 +42,14 @@ export class MemberService {
     routerAllocator: RouterAllocator,
     transportAllocator: TransportAllocator,
     memberStore: IStore<number, Member>,
+    idGen: IIdGenerator,
   ) {
     this.bus = bus;
     this.spaceService = spaceService;
     this.routerAllocator = routerAllocator;
     this.transportAllocator = transportAllocator;
     this.members = memberStore;
+    this.idGen = idGen;
   }
 
   start() {
@@ -59,18 +59,12 @@ export class MemberService {
     );
   }
 
-  _getNewId(): number {
-    const id = MemberService._idCounter;
-    MemberService._idCounter = (MemberService._idCounter + 1) % MemberService.MAX_COUNTER;
-    return id;
-  }
-
   get(id: number): Member | undefined {
     return this.members.get(id);
   }
 
   add(data: MemberData, initialState: MemberState, space: Space): Member {
-    const id = this._getNewId();
+    const id = this.idGen.next();
     const member: Member = {
       id, owningSpace: space,
       data, state: initialState,
@@ -92,9 +86,7 @@ export class MemberService {
   }
 
   onAddMemberRequest: QueueConsumerCallback<"addMemberRequest"> =
-    ({ spaceUuid, memberData, memberState }, ack, nack) => {
-      // TODO: Replace 0 with actual signaling server ID
-      const serverId = 0;
+    ({ serverId, spaceUuid, memberData, memberState }, ack, nack) => {
       if (!this.spaceService.isSubscribed(serverId, spaceUuid)) {
         nack(new Error("signaling server not subscribed to space"));
         return;

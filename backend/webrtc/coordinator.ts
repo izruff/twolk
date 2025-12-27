@@ -28,6 +28,7 @@ import { SpaceService } from "./space-service.ts";
 import { MemberService } from "./member-service.ts";
 import { SpaceUpdateDispatcher } from "./space-update-dispatcher.ts";
 import { InMemoryStore } from "./in-memory-store.ts";
+import { ProcessCounterIdGenerator } from "./id-gen-process.ts";
 import type { Space, Member } from "./domain.ts";
 
 
@@ -50,16 +51,21 @@ export class Coordinator {
     // lazily at call time once `this.spaceService` is set.
     const spaceStore = new InMemoryStore<string, Space>();
     const memberStore = new InMemoryStore<number, Member>();
+    const routerIdGen = new ProcessCounterIdGenerator();
+    const transportIdGen = new ProcessCounterIdGenerator();
+    const memberIdGen = new ProcessCounterIdGenerator();
 
     this.transportAllocator = new TransportAllocator(
       bus,
-      (serverId, uuid) => this.spaceService.isSubscribed(serverId, uuid),
+      (uuid) => this.spaceService.hasSubscribers(uuid),
+      transportIdGen,
     );
-    this.routerAllocator = new RouterAllocator(bus, this.transportAllocator);
+    this.routerAllocator = new RouterAllocator(
+      bus, this.transportAllocator, routerIdGen);
     this.spaceService = new SpaceService(bus, this.routerAllocator, spaceStore);
     this.memberService = new MemberService(
       bus, this.spaceService, this.routerAllocator, this.transportAllocator,
-      memberStore);
+      memberStore, memberIdGen);
     this.spaceUpdateDispatcher = new SpaceUpdateDispatcher(
       bus, this.spaceService, this.transportAllocator);
   }
