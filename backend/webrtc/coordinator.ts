@@ -8,9 +8,10 @@ In the future, it should also handle scaling the SFU workers horizontally,
 managing load distribution and RTP packet transfer between two workers, and
 implementing router migration policies from one worker to another.
 
-The coordinator no longer owns the inter-service message broker — that has
-moved to `bus.ts` and is injected as an `IMessageBus`. The wire contracts
-(queue payloads, space/transport update events) live in `bus.ts`.
+The coordinator is now a composition root for the smaller coordinator-side
+services: RouterAllocator, TransportAllocator, SpaceService, MemberService.
+The space/transport update event handlers still live here for the moment
+and will move into SpaceUpdateDispatcher in the next commit.
 
 Small note: A lot of these functions are not too complicated due to the
 fact that TypeScript runs on single-threaded event loop, so we don't have
@@ -23,7 +24,8 @@ import type {
 } from "./bus.ts";
 import { RouterAllocator } from "./router-allocator.ts";
 import { TransportAllocator } from "./transport-allocator.ts";
-import type { Member, MemberData, MemberState, Space } from "./domain.ts";
+import { SpaceService } from "./space-service.ts";
+import { MemberService } from "./member-service.ts";
 
 
 export class Coordinator {
@@ -31,47 +33,37 @@ export class Coordinator {
 
   bus: IMessageBus
 
-  spaces: Map<string, Space>
-  members: Map<number, Member>
-
-  spaceSubscriptions: Map<number, Set<string>>
-  spaceToSubscribedMap: Map<string, Set<number>>
-
   routerAllocator: RouterAllocator
   transportAllocator: TransportAllocator
+  spaceService: SpaceService
+  memberService: MemberService
 
-  // Cancellation handles for the bus subscriptions registered in start().
   _cancelConsumers: (() => void)[] = []
-
-
-  // These should be okay because these resources are not permanent and the
-  // traffic should not exceed this maximum limit.
-  // TODO: Phase 7 replaces these statics with an injected IIdGenerator.
-  static MAX_COUNTER = Number.MAX_SAFE_INTEGER
-  static _memberIdCounter = 0
 
   constructor(bus: IMessageBus) {
     this.bus = bus;
 
-    this.spaces = new Map();
-    this.members = new Map();
-
-    this.spaceSubscriptions = new Map();
-    this.spaceToSubscribedMap = new Map();
-
+    // The "is this space subscribed?" check is supplied as a closure so
+    // TransportAllocator can be built before SpaceService — resolved
+    // lazily at call time once `this.spaceService` is set.
     this.transportAllocator = new TransportAllocator(
-      bus, this._isSubscribedToSpace.bind(this));
+      bus,
+      (serverId, uuid) => this.spaceService.isSubscribed(serverId, uuid),
+    );
     this.routerAllocator = new RouterAllocator(bus, this.transportAllocator);
+    this.spaceService = new SpaceService(bus, this.routerAllocator);
+    this.memberService = new MemberService(
+      bus, this.spaceService, this.routerAllocator, this.transportAllocator);
   }
 
-  // Registers bus consumers. Must be called once after construction;
+  // Registers bus consumers on every sub-service plus the two handlers
+  // still owned by Coordinator. Must be called once after construction;
   // the coordinator is inert until then.
   start() {
+    this.spaceService.start();
+    this.memberService.start();
+
     this._cancelConsumers.push(
-      this.bus.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this)),
-      this.bus.consume("addMemberRequest", this.onAddMemberRequest.bind(this)),
-      this.bus.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this)),
-      this.bus.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this)),
       this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this)),
       this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this)),
     );
@@ -79,287 +71,18 @@ export class Coordinator {
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
     //   console.log("=== Coordinator State ===");
-    //   console.log("Spaces:", this.spaces);
-    //   console.log("Members:", this.members);
+    //   console.log("Spaces:", this.spaceService.spaces);
+    //   console.log("Members:", this.memberService.members);
     //   console.log("Routers:", this.routerAllocator.routers);
     //   console.log("Transports:", this.transportAllocator.transports);
     // }, 5000);
   }
 
-  _getNewMemberId() {
-    const id = Coordinator._memberIdCounter;
-    Coordinator._memberIdCounter = (Coordinator._memberIdCounter + 1) % Coordinator.MAX_COUNTER;
-    return id;
-  }
-
-  _subscribeToSpace(serverId: number, uuid: string) {
-    if (!this.spaceSubscriptions.has(serverId)) {
-      this.spaceSubscriptions.set(serverId, new Set());
-    }
-    this.spaceSubscriptions.get(serverId)!.add(uuid);
-
-    if (!this.spaceToSubscribedMap.has(uuid)) {
-      this.spaceToSubscribedMap.set(uuid, new Set());
-    }
-    this.spaceToSubscribedMap.get(uuid)!.add(serverId);
-  }
-
-  _unsubscribeFromSpace(serverId: number, uuid: string) {
-    if (this.spaceSubscriptions.has(serverId)) {
-      const set = this.spaceSubscriptions.get(serverId)!;
-      set.delete(uuid);
-      if (set.size === 0) {
-        this.spaceSubscriptions.delete(serverId);
-      }
-    }
-
-    if (this.spaceToSubscribedMap.has(uuid)) {
-      const set = this.spaceToSubscribedMap.get(uuid)!;
-      set.delete(serverId);
-      if (set.size === 0) {
-        this.spaceToSubscribedMap.delete(uuid);
-      }
-    }
-  }
-
-  _isSubscribedToSpace(serverId: number, uuid: string) {
-    if (!this.spaceSubscriptions.has(serverId)) {
-      return false;
-    }
-    return this.spaceSubscriptions.get(serverId)!.has(uuid);
-  }
-
-  _addSpace(uuid: string) {
-    const space: Space = {
-      uuid, primaryRouter: null,
-      data: {
-        name: "PLACEHOLDER",  // TODO: Need to retrieve data from DB
-      },
-      members: new Map(),
-    };
-    this.spaces.set(uuid, space);
-    return space;
-  }
-
-  _removeSpace(uuid: string) {
-    const space = this.spaces.get(uuid);
-    if (space === undefined) {
-      return;
-    }
-
-    // Clean up associated routers (which also cleans up transports)
-    if (space.primaryRouter !== null) {
-      this.routerAllocator.remove(space.primaryRouter.id);
-    }
-
-    // Clean up associated members
-    space.members.forEach((member) => {
-      this._removeMember(member.id);
-    });
-
-    this.spaces.delete(uuid);
-  }
-
-  _addMember(data: MemberData, initialState: MemberState, space: Space): Member {
-    const id = this._getNewMemberId();
-    const member: Member = {
-      id, owningSpace: space,
-      data, state: initialState,
-      producer: null,
-      memberToConsumerMap: new Map(),
-    };
-    this.members.set(member.id, member);
-    space.members.set(member.id, member);
-    return member;
-  }
-
-  _removeMember(id: number) {
-    const member = this.members.get(id);
-    if (member === undefined) {
-      return;
-    }
-    member.owningSpace.members.delete(id);
-    this.members.delete(id);
-  }
-
-  onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
-    ({ uuid }, ack, nack) => {
-      // Callback function to subscribe and ack after the space is ready
-      const subscribeAndAckFn = () => {
-        const space = this.spaces.get(uuid)!;
-        if (space.primaryRouter === null ||
-          space.primaryRouter.rtpCapabilities === null) {
-            // This should not happen because _allocateRouter waits for router
-            // allocation to finish before calling this function.
-            nack(new Error("space router not allocated yet"));
-            return;
-          }
-        // TODO: Replace 0 with actual signaling server ID
-        this._subscribeToSpace(0, uuid);
-
-        // Deep-copy the objects instead of sharing reference (only because
-        // we are simulating everything in one process).
-        ack({
-          clientSideSpace: {
-            uuid: space.uuid,
-            data: structuredClone(space.data),
-            members: Array.from(space.members.entries()).map(
-              ([id, member]) => ({
-                id, data: structuredClone(member.data),
-                state: structuredClone(member.state)
-              })
-            ),
-          },
-          routerRtpCapabilities: space.primaryRouter.rtpCapabilities,
-        });
-      }
-
-      // TODO: This logic is only for spaces created upon joining.
-      // We need to handle other kinds of spaces in the future.
-      if (!this.spaces.has(uuid)) {
-        const space = this._addSpace(uuid);
-
-        // Allocate a router for this space. For now, we assume each space uses
-        // exactly one router, and only one worker is present. In the future,
-        // we might want to have multiple routers per space for load balancing.
-        this.routerAllocator.allocate(space)
-          .then((_) => {
-            subscribeAndAckFn();
-          })
-          .catch((e: Error) => {
-            // TODO: Need retry mechanism
-            throw new Error("newRouterRequest nacked: " + e.message);
-          });
-      } else {
-        subscribeAndAckFn();
-      }
-    }
-
-  onAddMemberRequest: QueueConsumerCallback<"addMemberRequest"> =
-    ({ spaceUuid, memberData, memberState }, ack, nack) => {
-      // TODO: Replace 0 with actual signaling server ID
-      const serverId = 0;
-      if (!this._isSubscribedToSpace(serverId, spaceUuid)) {
-        nack(new Error("signaling server not subscribed to space"));
-        return;
-      }
-
-      const space = this.spaces.get(spaceUuid);
-      if (space === undefined) {
-        nack(new Error("space not found"));
-        return;
-      }
-
-      // Make sure to allocate router first
-      this.routerAllocator.allocate(space)
-        .then((router) => {
-          const newMember = this._addMember(memberData, memberState, space);
-
-          // Allocate transports asynchronously
-          // First we allocate the producer transport for the new member
-          this.transportAllocator.allocate(router, newMember, undefined)
-            .then((newMemberTransport) => {
-              newMember.producer = newMemberTransport;
-              // For every other member in the space:
-              //  - allocate a consumer transport for them to consume from the
-              //    new member (worker will buffer the consume until the new
-              //    member's producer is actually producing).
-              //  - allocate a consumer transport for the new member to consume
-              //    from them (their producer may or may not be producing yet;
-              //    the worker buffer handles both cases).
-              space.members.forEach((other) => {
-                if (other.id === newMember.id) return;
-                this.transportAllocator.allocate(router, other, newMemberTransport.id)
-                  .catch((e: any) => {
-                    console.log("failed to allocate consumer transport for " +
-                      `member ${other.id} consuming new member: ${e.message}`);
-                  });
-                if (other.producer !== null) {
-                  this.transportAllocator.allocate(router, newMember, other.producer.id)
-                    .catch((e: any) => {
-                      console.log("failed to allocate consumer transport for " +
-                        `new member consuming member ${other.id}: ${e.message}`);
-                    });
-                }
-              });
-            })
-            .catch((e: any) => {
-              // TODO: Handle errors; we can just let the client retry.
-              console.log("failed to allocate producer transport: " + e.message);
-            });
-
-          ack({ id: newMember.id });
-        })
-        .catch((e: any) => {
-          nack(new Error("failed to allocate router: " + e.message));
-        });
-
-      // TODO: Notify other members about the new member.
-      // Currently, we only have one signaling server, so this is not needed.
-    };
-
-  onRemoveMemberRequest: QueueConsumerCallback<"removeMemberRequest"> =
-    ({ id }, ack, nack) => {
-      const member = this.members.get(id);
-      if (member === undefined) {
-        nack(new Error("member not found"));
-        return;
-      }
-
-      const space = member.owningSpace;
-
-      // Clean up transports associated with this member
-      if (member.producer !== null) {
-        this.transportAllocator.remove(member.producer.id);
-      }
-      member.memberToConsumerMap.forEach((transport) => {
-        this.transportAllocator.remove(transport.id);
-      });
-
-      // Clean up member
-      this._removeMember(id);
-
-      // Clean up space if it has met ending conditions and no server is
-      // subscribed to it.
-      // TODO: This logic is only for spaces removed upon last member leaving.
-      // We need to handle other kinds of spaces in the future.
-      if (space.members.size === 0 && !this.spaceToSubscribedMap.has(space.uuid)) {
-        this._removeSpace(space.uuid);
-      }
-
-      ack();
-
-      // TODO: Notify other members about the removal.
-      // Currently, we only have one signaling server, so this is not needed.
-    };
-
-  onUnsubscribeFromSpaceRequest: QueueConsumerCallback<"unsubscribeFromSpaceRequest"> =
-    ({ uuid }, ack, nack) => {
-      const space = this.spaces.get(uuid);
-      if (space === undefined) {
-        nack(new Error("space not found"));
-        return;
-      }
-
-      // TODO: Replace 0 with actual signaling server ID
-      this._unsubscribeFromSpace(0, uuid);
-
-      // Clean up space if it has met ending conditions and no server is
-      // subscribed to it.
-      // TODO: This logic is only for spaces removed upon last member leaving.
-      // We need to handle other kinds of spaces in the future.
-      if (space.members.size === 0 && !this.spaceToSubscribedMap.has(space.uuid)) {
-        this._removeSpace(space.uuid);
-      }
-
-      ack();
-    };
-
   onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
     ({ uuid, type, payload }, ack, nack) => {
       if (type.startsWith("C:")) return;
 
-      const space = this.spaces.get(uuid);
+      const space = this.spaceService.get(uuid);
       if (space === undefined) {
         nack(new Error("space not found"));
         return;
@@ -428,7 +151,7 @@ export class Coordinator {
           ack({ id: resp!.id });
           // Notify the space members about the new producer
           // TODO: Get list of all subscribed servers instead of just 0
-          if (this._isSubscribedToSpace(0, uuid)) {
+          if (this.spaceService.isSubscribed(0, uuid)) {
             console.log("Notifying space members about new producer for member", payload.memberId);
             this.bus.publish("spaceUpdateStream", {
               uuid,
@@ -438,7 +161,7 @@ export class Coordinator {
               },
             }, () => {
               // Do nothing for now
-            }, (e: Error) => {
+            }, (_e: Error) => {
               // Since this event is just a notification, we do nothing.
               // Client should treat this as a best-effort notification.
             });
