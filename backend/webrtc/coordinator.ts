@@ -18,75 +18,12 @@ to worry about race conditions and order of operations too much.
 
 */
 
-import mediasoup from "mediasoup";
-import mediasoupClient from "mediasoup-client";
-
 import type {
   IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
-
-
-export interface SpaceData {
-  name: string;
-}
-
-interface Space {
-  uuid: string;
-  // TODO: This should be a map in the future
-  primaryRouter: Router | null;
-  data: SpaceData;
-  members: Map<number, Member>
-}
-
-export interface MemberData {
-  name: string;
-}
-
-export interface MemberState {
-  // Changes made by the client
-  isMuted: boolean;
-
-  // Changes made by the server
-  transportIsConnected: boolean;
-}
-
-interface Member {
-  id: number;
-  owningSpace: Space;
-  data: MemberData;
-  state: MemberState;
-  producer: Transport | null;
-  memberToConsumerMap: Map<number, Transport>;
-}
-
-interface Router {
-  id: number;
-  owningSpace: Space;
-  rtpCapabilities: mediasoup.types.RtpCapabilities | null;
-  transports: Map<number, Transport>;
-}
-
-type TransportStatus = "unallocated" | "allocated" | "connected";
-
-export interface TransportMetadata {
-  options: mediasoupClient.types.TransportOptions;
-}
-
-interface Transport {
-  id: number;
-  owningMember: Member;
-  owningRouter: Router;
-  consumesFromTransportId?: number;
-  status: TransportStatus;
-  metadata?: TransportMetadata;
-}
-
-export type ClientSideSpace = Omit<Space, "primaryRouter" | "members"> & {
-  members: ClientSideMember[];
-};
-
-export type ClientSideMember = Omit<Member,
-  "owningSpace" | "producer" | "memberToConsumerMap">;
+import { RouterAllocator } from "./router-allocator.ts";
+import { TransportAllocator } from "./transport-allocator.ts";
+import type { Member, MemberData, MemberState, Space } from "./domain.ts";
 
 
 export class Coordinator {
@@ -96,11 +33,12 @@ export class Coordinator {
 
   spaces: Map<string, Space>
   members: Map<number, Member>
-  routers: Map<number, Router>
-  transports: Map<number, Transport>
 
   spaceSubscriptions: Map<number, Set<string>>
   spaceToSubscribedMap: Map<string, Set<number>>
+
+  routerAllocator: RouterAllocator
+  transportAllocator: TransportAllocator
 
   // Cancellation handles for the bus subscriptions registered in start().
   _cancelConsumers: (() => void)[] = []
@@ -108,21 +46,22 @@ export class Coordinator {
 
   // These should be okay because these resources are not permanent and the
   // traffic should not exceed this maximum limit.
+  // TODO: Phase 7 replaces these statics with an injected IIdGenerator.
   static MAX_COUNTER = Number.MAX_SAFE_INTEGER
-  static _routerIdCounter = 0
   static _memberIdCounter = 0
-  static _transportIdCounter = 0
 
   constructor(bus: IMessageBus) {
     this.bus = bus;
 
     this.spaces = new Map();
     this.members = new Map();
-    this.routers = new Map();
-    this.transports = new Map();
 
     this.spaceSubscriptions = new Map();
     this.spaceToSubscribedMap = new Map();
+
+    this.transportAllocator = new TransportAllocator(
+      bus, this._isSubscribedToSpace.bind(this));
+    this.routerAllocator = new RouterAllocator(bus, this.transportAllocator);
   }
 
   // Registers bus consumers. Must be called once after construction;
@@ -142,21 +81,9 @@ export class Coordinator {
     //   console.log("=== Coordinator State ===");
     //   console.log("Spaces:", this.spaces);
     //   console.log("Members:", this.members);
-    //   console.log("Routers:", this.routers);
-    //   console.log("Transports:", this.transports);
+    //   console.log("Routers:", this.routerAllocator.routers);
+    //   console.log("Transports:", this.transportAllocator.transports);
     // }, 5000);
-  }
-
-  _getNewTransportId() {
-    const id = Coordinator._transportIdCounter;
-    Coordinator._transportIdCounter = (Coordinator._transportIdCounter + 1) % Coordinator.MAX_COUNTER;
-    return id;
-  }
-
-  _getNewRouterId() {
-    const id = Coordinator._routerIdCounter;
-    Coordinator._routerIdCounter = (Coordinator._routerIdCounter + 1) % Coordinator.MAX_COUNTER;
-    return id;
   }
 
   _getNewMemberId() {
@@ -222,7 +149,7 @@ export class Coordinator {
 
     // Clean up associated routers (which also cleans up transports)
     if (space.primaryRouter !== null) {
-      this._removeRouter(space.primaryRouter.id);
+      this.routerAllocator.remove(space.primaryRouter.id);
     }
 
     // Clean up associated members
@@ -253,131 +180,6 @@ export class Coordinator {
     }
     member.owningSpace.members.delete(id);
     this.members.delete(id);
-  }
-
-  async _allocateTransport(router: Router, member: Member,
-    consumesFromTransportId?: number): Promise<Transport> {
-    if (consumesFromTransportId !== undefined && !this.transports.has(consumesFromTransportId)) {
-      throw new Error("producing transport not found");
-    }
-
-    // Create the transport object
-    const id = this._getNewTransportId();
-    const transport: Transport = {
-      id, owningRouter: router, owningMember: member,
-      consumesFromTransportId, status: "unallocated"
-    };
-    this.transports.set(id, transport);
-    router.transports.set(id, transport);
-    if (consumesFromTransportId === undefined) {
-      // Only a producer transport should be tracked as the member's producer;
-      // a consumer transport is tracked via memberToConsumerMap below.
-      member.producer = transport;
-    }
-    console.log(`[${(new Date()).toISOString()}] Added unallocated transport ${id} (member=${member.id}, consumesFromTransportId=${consumesFromTransportId})`);
-
-    // Return the transport once it is successfully allocated, or an error occurred
-    // while allocating.
-    return new Promise<Transport>((resolve, reject) => {
-      this.bus.publish("newWebRtcTransportRequest", {
-        routerId: transport.owningRouter.id,
-        assignedId: transport.id,
-        isProducer: transport.consumesFromTransportId === undefined,
-      }, ({ options }) => {
-        transport.metadata = { options };
-        transport.status = "allocated";
-        if (consumesFromTransportId !== undefined) {
-          const producerTransport = this.transports.get(consumesFromTransportId)!;
-          member.memberToConsumerMap.set(producerTransport.owningMember.id,
-            this.transports.get(id)!);
-        }
-        console.log(`[${(new Date()).toISOString()}] Transport ${id} allocated`);
-
-        resolve(transport);
-
-        // TODO: Get list of all subscribed servers instead of just 0
-        const spaceUuid = transport.owningRouter.owningSpace.uuid;
-        if (this._isSubscribedToSpace(0, spaceUuid)) {
-          let consumesFromMemberId: number | undefined = undefined;
-          if (transport.consumesFromTransportId !== undefined) {
-            const producingTransport = this.transports.get(
-              transport.consumesFromTransportId);
-            if (producingTransport !== undefined) {
-              consumesFromMemberId = producingTransport.owningMember.id;
-            }
-          }
-          this.bus.publish("spaceUpdateStream", {
-            uuid: spaceUuid,
-            type: "C:transportParamsEvent",
-            payload: {
-              memberId: transport.owningMember.id,
-              consumesFromMemberId,
-              options: transport.metadata.options,
-            },
-          }, () => {
-            // Nothing for now
-          }, (e: Error) => {
-            // Since this event is just a notification, we ignore for now.
-            // TODO: Client should handle retry (implement in signaling server).
-          });
-        }
-      }, (e: Error) => {
-        // TODO: Need retry mechanism
-        reject(new Error("newWebRtcTransportRequest nacked: " + e.message));
-      });
-    });
-  }
-
-  async _removeTransport(transportId: number) {
-    // TODO: Need to send message to SFU worker to deallocate.
-    this.transports.delete(transportId);
-  }
-
-  // When we scale the workers, we might need this to distribute members across
-  // multiple resources. For now, we just allocate one router for each space;
-  // we call this the primary router.
-  async _allocateRouter(space: Space): Promise<Router> {
-    if (space.primaryRouter === null) {
-      // Create the router object
-      const id = this._getNewRouterId();
-      const router: Router = {
-        id, owningSpace: space,
-        rtpCapabilities: null,
-        transports: new Map(),
-      }
-      this.routers.set(id, router);
-
-      // Return the router once it is successfully allocated, or an error
-      // occurred while allocating.
-      return new Promise<Router>((resolve, reject) => {
-        this.bus.publish("newRouterRequest", { assignedId: router.id },
-          ({ rtpCapabilities }) => {
-            router.rtpCapabilities = rtpCapabilities;
-            space.primaryRouter = router;
-            resolve(router);
-          },
-          (e: Error) => {
-            reject(new Error("newRouterRequest nacked: " + e.message));
-          })
-      })
-    } else {
-      return space.primaryRouter;
-    }
-  }
-
-  async _removeRouter(routerId: number) {
-    const router = this.routers.get(routerId);
-    if (router === undefined) {
-      return;
-    }
-
-    // Clean up associated transports
-    router.transports.forEach((transport) => {
-      this._removeTransport(transport.id);
-    });
-
-    // TODO: Need to send message to SFU worker to deallocate.
-    this.routers.delete(routerId);
   }
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
@@ -420,7 +222,7 @@ export class Coordinator {
         // Allocate a router for this space. For now, we assume each space uses
         // exactly one router, and only one worker is present. In the future,
         // we might want to have multiple routers per space for load balancing.
-        this._allocateRouter(space)
+        this.routerAllocator.allocate(space)
           .then((_) => {
             subscribeAndAckFn();
           })
@@ -449,13 +251,13 @@ export class Coordinator {
       }
 
       // Make sure to allocate router first
-      this._allocateRouter(space)
+      this.routerAllocator.allocate(space)
         .then((router) => {
           const newMember = this._addMember(memberData, memberState, space);
 
           // Allocate transports asynchronously
           // First we allocate the producer transport for the new member
-          this._allocateTransport(router, newMember, undefined)
+          this.transportAllocator.allocate(router, newMember, undefined)
             .then((newMemberTransport) => {
               newMember.producer = newMemberTransport;
               // For every other member in the space:
@@ -467,13 +269,13 @@ export class Coordinator {
               //    the worker buffer handles both cases).
               space.members.forEach((other) => {
                 if (other.id === newMember.id) return;
-                this._allocateTransport(router, other, newMemberTransport.id)
+                this.transportAllocator.allocate(router, other, newMemberTransport.id)
                   .catch((e: any) => {
                     console.log("failed to allocate consumer transport for " +
                       `member ${other.id} consuming new member: ${e.message}`);
                   });
                 if (other.producer !== null) {
-                  this._allocateTransport(router, newMember, other.producer.id)
+                  this.transportAllocator.allocate(router, newMember, other.producer.id)
                     .catch((e: any) => {
                       console.log("failed to allocate consumer transport for " +
                         `new member consuming member ${other.id}: ${e.message}`);
@@ -508,10 +310,10 @@ export class Coordinator {
 
       // Clean up transports associated with this member
       if (member.producer !== null) {
-        this._removeTransport(member.producer.id);
+        this.transportAllocator.remove(member.producer.id);
       }
       member.memberToConsumerMap.forEach((transport) => {
-        this._removeTransport(transport.id);
+        this.transportAllocator.remove(transport.id);
       });
 
       // Clean up member
@@ -770,7 +572,7 @@ export class Coordinator {
     ({ id, type, payload }, ack, nack) => {
       if (type.startsWith("C:")) return;
 
-      const transport = this.transports.get(id);
+      const transport = this.transportAllocator.get(id);
       if (transport === undefined) {
         nack(new Error("transport not found"));
         return;

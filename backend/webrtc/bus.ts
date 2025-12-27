@@ -18,7 +18,7 @@ import type mediasoupClient from "mediasoup-client";
 
 import type {
   MemberData, MemberState, ClientSideSpace
-} from "./coordinator.ts";
+} from "./domain.ts";
 
 
 // Most of these should have a message tag if we want to have more than one

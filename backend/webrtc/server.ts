@@ -18,7 +18,7 @@ import type {
 } from "./bus.ts";
 import type {
   SpaceData, MemberData, MemberState, ClientSideSpace, ClientSideMember
-} from "./coordinator.ts";
+} from "./domain.ts";
 
 import https from "node:https";
 import { Server as BaseServer, Socket as BaseSocket, type ServerOptions } from "socket.io";
