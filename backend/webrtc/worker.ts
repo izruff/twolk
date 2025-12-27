@@ -7,7 +7,7 @@ Implementation of the SFU worker.
 
 */
 
-import { Coordinator, type QueueConsumerCallback, type QueueResponseTypeMap } from "./coordinator.ts";
+import type { IMessageBus, QueueConsumerCallback, QueueResponseTypeMap } from "./bus.ts";
 import { getPublicIpAddress } from "./utils/network.ts";
 
 import mediasoup from "mediasoup";
@@ -51,7 +51,7 @@ interface PendingConsume {
 
 export class SfuWorker {
   mediasoupWorker: mediasoup.types.Worker
-  coordinator: Coordinator
+  bus: IMessageBus
 
   routers: Map<number, Router>
   transports: Map<number, Transport<mediasoup.types.Transport>>
@@ -60,17 +60,17 @@ export class SfuWorker {
   // Keyed by producing transport id; flushed when that producer is created.
   pendingConsumes: Map<number, PendingConsume[]>
 
-  constructor(worker: mediasoup.types.Worker, coordinator: Coordinator) {
+  constructor(worker: mediasoup.types.Worker, bus: IMessageBus) {
     this.mediasoupWorker = worker;
-    this.coordinator = coordinator;
+    this.bus = bus;
 
     this.routers = new Map();
     this.transports = new Map();
     this.pendingConsumes = new Map();
 
-    this.coordinator.consume("newRouterRequest", this.onNewRouterRequest.bind(this));
-    this.coordinator.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this));
-    this.coordinator.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+    this.bus.consume("newRouterRequest", this.onNewRouterRequest.bind(this));
+    this.bus.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this));
+    this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
@@ -82,7 +82,7 @@ export class SfuWorker {
 
   static async create(
     rtcPortRange: { min: number, max: number },
-    coordinator: Coordinator,
+    bus: IMessageBus,
     onDied: (err: Error) => void,
   ) {
     const worker = await mediasoup.createWorker({
@@ -92,7 +92,7 @@ export class SfuWorker {
 
     worker.on("died", onDied);
 
-    return new SfuWorker(worker, coordinator);
+    return new SfuWorker(worker, bus);
   }
 
   // TODO: Refactor this so the router handles this logic instead of calling this

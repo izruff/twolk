@@ -13,10 +13,11 @@ to worry about race conditions and order of operations too much.
 
 */
 
-import { Coordinator } from "./coordinator.ts";
 import type {
-  SpaceData, MemberData, MemberState, QueueConsumerCallback,
-  SpaceUpdateSTypes, ClientSideSpace, ClientSideMember
+  IMessageBus, QueueConsumerCallback, SpaceUpdateSTypes
+} from "./bus.ts";
+import type {
+  SpaceData, MemberData, MemberState, ClientSideSpace, ClientSideMember
 } from "./coordinator.ts";
 
 import https from "node:https";
@@ -223,7 +224,7 @@ function getClientSideMember(member: Member): ClientSideMember {
 
 export class SignalingServer {
   server: Server
-  coordinator: Coordinator
+  bus: IMessageBus
 
   connections: Map<string, Connection>
   memberIdToSocket: Map<number, Socket>
@@ -231,9 +232,9 @@ export class SignalingServer {
   spaces: Map<string, Space>
   members: Map<number, Member>
 
-  constructor(server: Server, coordinator: Coordinator) {
+  constructor(server: Server, bus: IMessageBus) {
     this.server = server;
-    this.coordinator = coordinator;
+    this.bus = bus;
 
     this.connections = new Map();
     this.memberIdToSocket = new Map();
@@ -243,7 +244,7 @@ export class SignalingServer {
 
     this.server.on("connection", this.onConnection.bind(this));
 
-    this.coordinator.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
+    this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
@@ -256,12 +257,12 @@ export class SignalingServer {
   }
 
   static create(httpsOptions: https.ServerOptions, ioOptions: Partial<ServerOptions>,
-    port: number, coordinator: Coordinator): SignalingServer {
+    port: number, bus: IMessageBus): SignalingServer {
     const httpsServer = https.createServer(httpsOptions);
     httpsServer.listen(port);
 
     const server: Server = new BaseServer(httpsServer, ioOptions);
-    return new SignalingServer(server, coordinator);
+    return new SignalingServer(server, bus);
   }
 
   _addSpace(uuid: string, data: SpaceData,
@@ -364,7 +365,7 @@ export class SignalingServer {
           // @ts-ignore ('data' implicitly has 'any' type)
           socket.on(clientEventType, async (data, cId) => {
             console.log(`[${socket.id}] received ${clientEventType}; data:`, data, "cId:", cId);
-            this.coordinator.publish("spaceUpdateStream", {
+            this.bus.publish("spaceUpdateStream", {
               uuid: spaceUuid,
               type: spaceUpdateType,
               payload: { memberId, data },
@@ -418,7 +419,7 @@ export class SignalingServer {
     }
 
     const promise = new Promise<void>((resolve) => {
-      this.coordinator.publish("subscribeToSpaceRequest", { uuid },
+      this.bus.publish("subscribeToSpaceRequest", { uuid },
         ({ clientSideSpace, routerRtpCapabilities }) => {
           if (!this.spaces.has(uuid)) {
             // Create the space and existing members object
@@ -455,7 +456,7 @@ export class SignalingServer {
     }
 
     const promise = new Promise<number>((resolve) => {
-      this.coordinator.publish("addMemberRequest", {
+      this.bus.publish("addMemberRequest", {
         spaceUuid, memberData, memberState
       }, ({ id }) => {
         if (!this.members.has(id)) {
@@ -522,7 +523,7 @@ export class SignalingServer {
     }
 
     const promise = new Promise<void>((resolve) => {
-      this.coordinator.publish("removeMemberRequest", { id: memberId },
+      this.bus.publish("removeMemberRequest", { id: memberId },
         () => {
           if (this.members.has(memberId)) {
             const space = this.members.get(memberId)!.owningSpace;
@@ -565,7 +566,7 @@ export class SignalingServer {
     }
 
     const promise = new Promise<void>((resolve) => {
-      this.coordinator.publish("unsubscribeFromSpaceRequest",
+      this.bus.publish("unsubscribeFromSpaceRequest",
         { uuid: spaceUuid },
         () => {
           this._removeSpace(spaceUuid);

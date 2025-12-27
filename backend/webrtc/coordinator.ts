@@ -8,6 +8,10 @@ In the future, it should also handle scaling the SFU workers horizontally,
 managing load distribution and RTP packet transfer between two workers, and
 implementing router migration policies from one worker to another.
 
+The coordinator no longer owns the inter-service message broker — that has
+moved to `bus.ts` and is injected as an `IMessageBus`. The wire contracts
+(queue payloads, space/transport update events) live in `bus.ts`.
+
 Small note: A lot of these functions are not too complicated due to the
 fact that TypeScript runs on single-threaded event loop, so we don't have
 to worry about race conditions and order of operations too much.
@@ -16,6 +20,10 @@ to worry about race conditions and order of operations too much.
 
 import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
+
+import type {
+  IMessageBus, QueueConsumerCallback,
+} from "./bus.ts";
 
 
 export interface SpaceData {
@@ -80,215 +88,16 @@ export type ClientSideSpace = Omit<Space, "primaryRouter" | "members"> & {
 export type ClientSideMember = Omit<Member,
   "owningSpace" | "producer" | "memberToConsumerMap">;
 
-// Most of these should have a message tag if we want to have more than one
-// signaling server or SFU worker, but we only use one for now, so no tags
-// needed.
-// TODO: The payloads for the result queues all assume that they never fail.
-// Currently, if something fails, the worker or signaling server throws an
-// error or process exits.
-export type QueuePayloadTypeMap = {
-  // Requests from coordinator to create a new router for a space
-  newRouterRequest: {
-    assignedId: number,
-  };
-  newWebRtcTransportRequest: {
-    routerId: number,
-    assignedId: number,
-    isProducer: boolean,
-  };
-  subscribeToSpaceRequest: {
-    uuid: string,
-  };
-  addMemberRequest: {
-    spaceUuid: string,
-    memberData: MemberData,
-    memberState: MemberState,
-  };
-  removeMemberRequest: {
-    id: number,
-  }
-  unsubscribeFromSpaceRequest: {
-    uuid: string,
-  };
-  spaceUpdateStream: { uuid: string } & {
-    [K in SpaceUpdateTypes]: { type: K; payload: SpaceUpdatePayloadTypeMap[K] }
-  }[SpaceUpdateTypes];
-  transportUpdateStream: { id: number } & {
-    [K in TransportUpdateTypes]: { type: K; payload: TransportUpdatePayloadTypeMap[K] }
-  }[TransportUpdateTypes];
-}
-
-export type QueueResponseTypeMap = {
-  newRouterRequest: {
-    rtpCapabilities: mediasoup.types.RtpCapabilities,
-  };
-  newWebRtcTransportRequest: {
-    options: mediasoupClient.types.TransportOptions,
-  };
-  subscribeToSpaceRequest: {
-    clientSideSpace: ClientSideSpace;
-    routerRtpCapabilities: mediasoup.types.RtpCapabilities;
-  };
-  addMemberRequest: {
-    id: number,
-  };
-  removeMemberRequest: void;
-  unsubscribeFromSpaceRequest: void;
-  // The optional fields are populated for produce/consume responses so the
-  // signaling server can forward them to the client's ack.
-  spaceUpdateStream: void | {
-    id: string,
-    producerId?: string,
-    kind?: mediasoup.types.MediaKind,
-    rtpParameters?: mediasoup.types.RtpParameters,
-  };
-  transportUpdateStream: void | {
-    id: string,
-    producerId?: string,
-    kind?: mediasoup.types.MediaKind,
-    rtpParameters?: mediasoup.types.RtpParameters,
-  };
-}
-
-// Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
-type QueueTypes = keyof QueuePayloadTypeMap & keyof QueueResponseTypeMap;
-
-export type QueueConsumerCallback<K extends QueueTypes> = (
-  payload: QueuePayloadTypeMap[K], ack: (resp: QueueResponseTypeMap[K]) => void, nack: (e: Error) => void
-) => void;
-
-type QueueConsumerCallbackCollection = {
-  [K in QueueTypes]: Set<QueueConsumerCallback<K>>;
-};
-
-
-// Space update stream messages
-// Types that start with 'S' come from the signaling server to the coordinator
-// Types that start with 'C' come from the coordinator to the signaling server
-
-export type SpaceUpdateSPayloadTypeMap = {
-  // Sent on an attempt to initiate producer transport connection
-  "S:memberProducerConnectEvent": {
-    memberId: number,
-    data: {
-      dtlsParameters: mediasoup.types.DtlsParameters,
-    },
-  };
-  // Sent on an attempt to start producing media
-  "S:memberProducerProduceEvent": {
-    memberId: number,
-    data: {
-      kind: mediasoup.types.MediaKind,
-      rtpParameters: mediasoup.types.RtpParameters,
-    },
-  };
-  // Sent on an attempt to initiate consumer transport connection
-  "S:memberConsumerConnectEvent": {
-    memberId: number,
-    data: {
-      dtlsParameters: mediasoup.types.DtlsParameters,
-      sourceMemberId: number,
-    },
-  };
-  // Sent on an attempt to start consuming media
-  "S:memberConsumerConsumeEvent": {
-    memberId: number,
-    data: {
-      rtpCapabilities: mediasoup.types.RtpCapabilities,
-      sourceMemberId: number,
-    },
-  };
-  // Sent to resume a consumer that is consuming media
-  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
-  "S:memberConsumerResumeEvent": {
-    memberId: number,
-    data: {
-      sourceMemberId: number,
-    },
-  };
-};
-
-export type SpaceUpdateCPayloadTypeMap = {
-  // Sent to provide transport parameters to client
-  "C:transportParamsEvent": {
-    memberId: number,
-    consumesFromMemberId?: number,
-    options: mediasoupClient.types.TransportOptions,
-  };
-  // Sent to notify that a producer has successfully connected and
-  // other members can start consuming.
-  "C:producerConnectedEvent": {
-    memberId: number,
-  };
-};
-
-export type SpaceUpdatePayloadTypeMap =
-  SpaceUpdateSPayloadTypeMap & SpaceUpdateCPayloadTypeMap;
-
-export type SpaceUpdateSTypes = keyof SpaceUpdateSPayloadTypeMap;
-export type SpaceUpdateCTypes = keyof SpaceUpdateCPayloadTypeMap;
-export type SpaceUpdateTypes = keyof SpaceUpdatePayloadTypeMap;
-
-
-// Transport update stream messages
-// Types that start with 'W' come from the SFU worker to the coordinator
-// Types that start with 'C' come from the coordinator to the SFU worker
-
-export type TransportUpdateWPayloadTypeMap = {
-  // Currently no messages from worker to coordinator
-};
-
-export type TransportUpdateCPayloadTypeMap = {
-  // Sent on an attempt to connect a producer/consumer transport to client 
-  "C:transportConnectEvent": {
-    dtlsParameters: mediasoup.types.DtlsParameters,
-  };
-  // Sent on an attempt to start producing media
-  "C:transportProducerProduceEvent": {
-    kind: mediasoup.types.MediaKind,
-    rtpParameters: mediasoup.types.RtpParameters,
-  };
-  // Sent on an attempt to start consuming media
-  "C:transportConsumerConsumeEvent": {
-    rtpCapabilities: mediasoup.types.RtpCapabilities,
-    producingTransportId: number,
-  };
-  // Sent to resume a consumer that is consuming media
-  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
-  "C:transportConsumerResumeEvent": {};
-};
-
-export type TransportUpdatePayloadTypeMap =
-  TransportUpdateWPayloadTypeMap & TransportUpdateCPayloadTypeMap;
-
-export type TransportUpdateWTypes = keyof TransportUpdateWPayloadTypeMap;
-export type TransportUpdateCTypes = keyof TransportUpdateCPayloadTypeMap;
-export type TransportUpdateTypes = keyof TransportUpdatePayloadTypeMap;
-
 
 export class Coordinator {
-  /*
-  This is a mock implementation of the coordinator service. In reality, this service
-  should be a separate microservice that communicates with the signaling server
-  and SFU workers via gRPC bidirectional streaming.
-  
-  The `queueConsumerCallbacks` map was meant to simulate message queues that the
-  coordinator service would publish to/consume from. Originally, it was meant as a
-  message broker simulator, but after some thinking, our needs are more aligned to a
-  request-response pattern that goes both ways; gRPC would be better suited for this.
-
-  Instead of changing the code to fit gRPC right away, we keep this as is for now,
-  but make it so that we can send messages both ways.
-  */
-
   // TODO: Need to also track servers in the future
+
+  bus: IMessageBus
 
   spaces: Map<string, Space>
   members: Map<number, Member>
   routers: Map<number, Router>
   transports: Map<number, Transport>
-
-  queueConsumerCallbacks: QueueConsumerCallbackCollection
 
   spaceSubscriptions: Map<number, Set<string>>
   spaceToSubscribedMap: Map<string, Set<number>>
@@ -301,33 +110,23 @@ export class Coordinator {
   static _memberIdCounter = 0
   static _transportIdCounter = 0
 
-  constructor() {
+  constructor(bus: IMessageBus) {
+    this.bus = bus;
+
     this.spaces = new Map();
     this.members = new Map();
     this.routers = new Map();
     this.transports = new Map();
 
-    // TODO: Automate this set instantiations
-    this.queueConsumerCallbacks = {
-      newRouterRequest: new Set(),
-      newWebRtcTransportRequest: new Set(),
-      subscribeToSpaceRequest: new Set(),
-      addMemberRequest: new Set(),
-      removeMemberRequest: new Set(),
-      unsubscribeFromSpaceRequest: new Set(),
-      spaceUpdateStream: new Set(),
-      transportUpdateStream: new Set(),
-    };
-
     this.spaceSubscriptions = new Map();
     this.spaceToSubscribedMap = new Map();
 
-    this.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this));
-    this.consume("addMemberRequest", this.onAddMemberRequest.bind(this));
-    this.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this));
-    this.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this));
-    this.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
-    this.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
+    this.bus.consume("subscribeToSpaceRequest", this.onSubscribeToSpaceRequest.bind(this));
+    this.bus.consume("addMemberRequest", this.onAddMemberRequest.bind(this));
+    this.bus.consume("removeMemberRequest", this.onRemoveMemberRequest.bind(this));
+    this.bus.consume("unsubscribeFromSpaceRequest", this.onUnsubscribeFromSpaceRequest.bind(this));
+    this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this));
+    this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this));
 
     // For debugging; print contents of all maps every 5 seconds
     // setInterval(() => {
@@ -471,7 +270,7 @@ export class Coordinator {
     // Return the transport once it is successfully allocated, or an error occurred
     // while allocating.
     return new Promise<Transport>((resolve, reject) => {
-      this.publish("newWebRtcTransportRequest", {
+      this.bus.publish("newWebRtcTransportRequest", {
         routerId: transport.owningRouter.id,
         assignedId: transport.id,
         isProducer: transport.consumesFromTransportId === undefined,
@@ -498,7 +297,7 @@ export class Coordinator {
               consumesFromMemberId = producingTransport.owningMember.id;
             }
           }
-          this.publish("spaceUpdateStream", {
+          this.bus.publish("spaceUpdateStream", {
             uuid: spaceUuid,
             type: "C:transportParamsEvent",
             payload: {
@@ -542,7 +341,7 @@ export class Coordinator {
       // Return the router once it is successfully allocated, or an error
       // occurred while allocating.
       return new Promise<Router>((resolve, reject) => {
-        this.publish("newRouterRequest", { assignedId: router.id },
+        this.bus.publish("newRouterRequest", { assignedId: router.id },
           ({ rtpCapabilities }) => {
             router.rtpCapabilities = rtpCapabilities;
             space.primaryRouter = router;
@@ -570,34 +369,6 @@ export class Coordinator {
 
     // TODO: Need to send message to SFU worker to deallocate.
     this.routers.delete(routerId);
-  }
-
-  // Attaches a callback to consume messages from a queue, i.e. subscribes to the
-  // queue. In gRPC terms, this is basically listening to a bidirectional stream,
-  // and ack() or nack() are used to send responses.
-  consume<K extends QueueTypes>(
-    queueName: K, callback: QueueConsumerCallback<K>
-  ): (() => void) {
-    const callbackSet = this.queueConsumerCallbacks[queueName];
-    callbackSet.add(callback);
-
-    const cancelCallback = () => {
-      callbackSet.delete(callback);
-    };
-    return cancelCallback;
-  }
-
-  // Publishes to a queue. In gRPC terms, this is basically sending messages to a
-  // bidirectional stream, and listening for responses via the provided onAck()
-  // and onNack() callbacks.
-  publish<K extends QueueTypes>(
-    queueName: K, payload: QueuePayloadTypeMap[K],
-    onAck: (resp: QueueResponseTypeMap[K]) => void,
-    onNack: (e: Error) => void,
-  ) {
-    this.queueConsumerCallbacks[queueName].forEach((callback) => {
-      callback(payload, onAck, onNack);
-    });
   }
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
@@ -798,7 +569,7 @@ export class Coordinator {
 
         // Notify SFU worker to initiate transport connection
         if (transport.status !== "connected") {
-          this.publish("transportUpdateStream", {
+          this.bus.publish("transportUpdateStream", {
             id: transport.id,
             type: "C:transportConnectEvent",
             payload: {
@@ -834,7 +605,7 @@ export class Coordinator {
         }
 
         // Notify SFU worker to start producing
-        this.publish("transportUpdateStream", {
+        this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportProducerProduceEvent",
           payload: {
@@ -848,7 +619,7 @@ export class Coordinator {
           // TODO: Get list of all subscribed servers instead of just 0
           if (this._isSubscribedToSpace(0, uuid)) {
             console.log("Notifying space members about new producer for member", payload.memberId);
-            this.publish("spaceUpdateStream", {
+            this.bus.publish("spaceUpdateStream", {
               uuid,
               type: "C:producerConnectedEvent",
               payload: {
@@ -884,7 +655,7 @@ export class Coordinator {
 
         // Notify SFU worker to initiate transport connection
         if (transport.status !== "connected") {
-          this.publish("transportUpdateStream", {
+          this.bus.publish("transportUpdateStream", {
             id: transport.id,
             type: "C:transportConnectEvent",
             payload: {
@@ -927,7 +698,7 @@ export class Coordinator {
         }
 
         // Notify SFU worker to start consuming
-        this.publish("transportUpdateStream", {
+        this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportConsumerConsumeEvent",
           payload: {
@@ -968,7 +739,7 @@ export class Coordinator {
 
         // Notify SFU worker to resume consuming
         // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
-        this.publish("transportUpdateStream", {
+        this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportConsumerResumeEvent",
           payload: {},
