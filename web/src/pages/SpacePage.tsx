@@ -62,7 +62,7 @@ function SpacePage() {
       ({ message }) => { console.error("failed:", message); },
     );
 
-    space.onProducerMemberEvent((event) => {
+    const producerHandler = (event: MemberClientEventType) => {
       if (event === "stateUpdated") {
         // Ideally we can sync snapshot with local state to ensure consistency
         // Ignore for now; we just use our local state and warn if inconsistent
@@ -72,9 +72,10 @@ function SpacePage() {
       } else {
         console.warn("Unknown producer member event:", event);
       }
-    });
+    };
+    space.onProducerMemberEvent(producerHandler);
 
-    space.onConsumerMemberEvent((memberId, event) => {
+    const consumerHandler = (memberId: number, event: MemberClientEventType) => {
       if (event === "stateUpdated") {
         // Already handled by snapshot
       } else if (event === "transportReady") {
@@ -107,9 +108,10 @@ function SpacePage() {
       } else {
         console.warn("Unknown consumer member event:", event);
       }
-    });
+    };
+    space.onConsumerMemberEvent(consumerHandler);
 
-    space.onSpaceInit(() => {
+    const spaceInitHandler = () => {
       const audioContextResumePromise = new Promise<void>((resolve) => {
         if (audioContextRef.current.state === "running") {
           resolve();
@@ -129,9 +131,13 @@ function SpacePage() {
           // TODO: How to handle this?
           console.error("Failed to initialize transport factory for space:", error);
         });
-    });
+    };
+    space.onSpaceInit(spaceInitHandler);
 
     return () => {
+      space.offProducerMemberEvent(producerHandler);
+      space.offConsumerMemberEvent(consumerHandler);
+      space.offSpaceInit(spaceInitHandler);
       space.cleanup();
       consumerAudioRefs.current.forEach((audio) => {
         audio.pause();
