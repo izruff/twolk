@@ -68,7 +68,6 @@ export class TransportAllocator {
       // memberToConsumerMap once the worker acks.
       member.producer = transport;
     }
-    console.log(`[${(new Date()).toISOString()}] Added unallocated transport ${id} (member=${member.id}, consumesFromTransportId=${consumesFromTransportId})`);
 
     return new Promise<Transport>((resolve, reject) => {
       this.bus.publish("newWebRtcTransportRequest", {
@@ -83,7 +82,6 @@ export class TransportAllocator {
           member.memberToConsumerMap.set(producerTransport.owningMember.id,
             this.transports.get(id)!);
         }
-        console.log(`[${(new Date()).toISOString()}] Transport ${id} allocated`);
 
         resolve(transport);
 

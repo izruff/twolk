@@ -89,7 +89,6 @@ export class TransportFactory {
 
   async init(routerRtpCapabilities: mediasoupClient.types.RtpCapabilities) {
     await this._mediasoupDevice.load({ routerRtpCapabilities });
-    console.log("Mediasoup device loaded with RTP capabilities:", this._mediasoupDevice.rtpCapabilities);
     if (!this._isReady && this._audioContext !== null) {
       this._isReady = true;
       this.notifyReady();
@@ -221,10 +220,6 @@ export class TransportFactory {
 
     // Server needs to have its transport consume first
     const cId = getRandomUUID();
-    console.log("Emitting transportConsumerConsume:", {
-      rtpCapabilities: this._mediasoupDevice.rtpCapabilities,
-      sourceMemberId,
-    })
     this._socket.emit("transportConsumerConsume", {
       rtpCapabilities: this._mediasoupDevice.rtpCapabilities,
       sourceMemberId,

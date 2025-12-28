@@ -262,14 +262,6 @@ export class SignalingServer {
 
     this._cancelConsumer = this.bus.consume(
       "spaceUpdateStream", this.onSpaceUpdate.bind(this));
-
-    // For debugging; print contents of all maps every 5 seconds
-    // setInterval(() => {
-    //   console.log("=== Signaling Server State ===");
-    //   console.log("Spaces:", this.spaces);
-    //   console.log("Members:", this.members);
-    //   console.log("MemberId to Channel Map:", this.memberIdToChannel);
-    // }, 5000);
   }
 
   _addSpace(uuid: string, data: SpaceData,
@@ -396,7 +388,6 @@ export class SignalingServer {
   }
 
   updateMember(memberId: number, update: Partial<MemberState>) {
-    console.log("Updating member", memberId, "with", update);
     const member = this.members.get(memberId);
     if (member === undefined) {
       throw new Error("member not found");
@@ -406,7 +397,6 @@ export class SignalingServer {
     // Notify all members in the space (whose channels we own)
     member.owningSpace.members.forEach((_, id) => {
       if (this.memberIdToChannel.has(id)) {
-        console.log("Notifying member", id, "about state update of member", memberId);
         this.memberIdToChannel.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
           memberId, newState: member.state
         });
@@ -504,8 +494,6 @@ export class SignalingServer {
           memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
         });
-        console.log(`[${channel.id}] sent memberEvent transportParams; memberId:`,
-          (payload.consumesFromMemberId ?? payload.memberId), "options:", payload.options);
 
         ack();
       } else if (type === "C:producerConnectedEvent") {

@@ -30,7 +30,6 @@ function SpacePage() {
     { name: 'You' },
     { isMuted: false },
   );
-  console.log("Space snapshot:", snapshot);
 
   // Expose internals for e2e testing.
   if (typeof window !== 'undefined') {

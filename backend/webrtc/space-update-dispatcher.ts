@@ -79,7 +79,6 @@ export class SpaceUpdateDispatcher {
             },
           }, () => {
             transport.status = "connected";
-            console.log(`[${(new Date()).toISOString()}] Producer transport ${transport.id} connected`);
             ack();
           }, (e: Error) => {
             // TODO: Need retry mechanism
@@ -115,13 +114,11 @@ export class SpaceUpdateDispatcher {
             rtpParameters: payload.data.rtpParameters,
           },
         }, (resp) => {
-          console.log("Producer started for member", payload.memberId);
           ack({ id: resp!.id });
           // Notify the space members about the new producer. Any
           // subscribed signaling server will pick this up from its
           // consume on spaceUpdateStream.
           if (this.spaceService.hasSubscribers(uuid)) {
-            console.log("Notifying space members about new producer for member", payload.memberId);
             this.bus.publish("spaceUpdateStream", {
               uuid,
               type: "C:producerConnectedEvent",
@@ -166,7 +163,6 @@ export class SpaceUpdateDispatcher {
             },
           }, () => {
             transport.status = "connected";
-            console.log(`[${(new Date()).toISOString()}] Consumer transport ${transport.id} connected`);
             ack();
           }, (e: Error) => {
             // TODO: Need retry mechanism

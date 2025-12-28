@@ -77,13 +77,6 @@ export class SfuWorker {
       this.bus.consume("newWebRtcTransportRequest", this.onNewWebRtcTransportRequest.bind(this)),
       this.bus.consume("transportUpdateStream", this.onTransportUpdate.bind(this)),
     );
-
-    // For debugging; print contents of all maps every 5 seconds
-    // setInterval(() => {
-    //   console.log("=== SFU Worker State ===");
-    //   console.log("Routers:", this.routers);
-    //   console.log("Transports:", this.transports);
-    // }, 5000);
   }
 
   // TODO: Refactor this so the router handles this logic instead of calling this
@@ -188,7 +181,6 @@ export class SfuWorker {
           .catch((err) => nack(err));
 
       } else if (type === "C:transportProducerProduceEvent") {
-        console.log(`Received C:transportProducerProduceEvent from transport ${id}:`, payload);
         const { kind, rtpParameters } = payload;
         transport.mediaTransport.produce(kind, rtpParameters)
           .then((producer) => {
@@ -211,8 +203,6 @@ export class SfuWorker {
           .catch((err) => nack(err));
 
       } else if (type === "C:transportConsumerConsumeEvent") {
-        console.log(`Received C:transportConsumerConsumeEvent from transport ${id}:`, payload);
-        console.log("Current transports:", this.transports);
         const { rtpCapabilities, producingTransportId } = payload;
         const producingTransport = this.transports.get(producingTransportId);
         if (producingTransport === undefined) {

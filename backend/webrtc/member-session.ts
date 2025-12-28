@@ -53,10 +53,7 @@ export class MemberSession {
   }
 
   async start(): Promise<void> {
-    console.log(`[${this.channel.id}] connected`);
-
     this.channel.onClose(() => {
-      console.log(`[${this.channel.id}] disconnected`);
       if (this.memberId !== null) {
         this.server.unregisterChannel(this.memberId);
         this.server.deleteMember(this.memberId);
@@ -73,7 +70,6 @@ export class MemberSession {
     try {
       await this.server.prepareSpace(spaceUuid);
       this.channel.emit("connectionSuccessful");
-      console.log(`[${this.channel.id}] sent connectionSuccessful`);
 
       const memberId = await this.server.prepareMember(spaceUuid,
         memberData, {
@@ -95,15 +91,12 @@ export class MemberSession {
       }) as ClientToServerEvents["resendSpaceInit"]);
 
       this.channel.on("updateMemberState", (async ({ newState }, cId) => {
-        console.log(`[${this.channel.id}] received updateMemberState; newState:`, newState, "cId:", cId);
         try {
           this.server.updateMember(memberId, newState);
           this.channel.emit("updateMemberStateAck", cId);
-          console.log(`[${this.channel.id}] sent updateMemberStateAck; cId:`, cId);
         } catch (_err) {
           // TODO: Need to handle failure properly
           this.channel.emit("updateMemberStateAck", cId);
-          console.log(`[${this.channel.id}] sent updateMemberStateAck; cId:`, cId);
         }
       }) as ClientToServerEvents["updateMemberState"]);
 
@@ -112,7 +105,6 @@ export class MemberSession {
       FORWARD_AND_ACK_LISTEN_EVENTS_MAP.forEach((spaceUpdateType,
         clientEventType) => {
           this.channel.on(clientEventType, (async (data: any, cId: string) => {
-            console.log(`[${this.channel.id}] received ${clientEventType}; data:`, data, "cId:", cId);
             this.bus.publish("spaceUpdateStream", {
               uuid: spaceUuid,
               type: spaceUpdateType,
@@ -129,7 +121,6 @@ export class MemberSession {
               } else {
                 this.channel.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
               }
-              console.log(`[${this.channel.id}] sent ${clientEventType + "Ack"}; cId:`, cId);
             }, (e: Error) => {
               // TODO: Need retry mechanism, then notify client on failure
               console.error(`[${this.channel.id}] failed to forward ${clientEventType}:`,
@@ -140,14 +131,11 @@ export class MemberSession {
 
       // This message also serves as confirmation that the client can start
       // sending messages back to the server.
-      console.log(`Member ${memberId} successfully joined space ${spaceUuid}`);
       this.channel.emit("memberEvent", "spaceInit", {
         receivingMemberId: memberId,
         routerRtpCapabilities: space.routerRtpCapabilities,
         clientSideSpace: getClientSideSpace(space),
       });
-      console.log(`[${this.channel.id}] sent memberEvent spaceInit; receivingMemberId:`,
-        memberId, "routerRtpCapabilities:", space.routerRtpCapabilities, "clientSideSpace:", getClientSideSpace(space));
 
       // This map will be used to broadcast updates, and this insertion needs
       // to be performed with the memberEvent emission atomically; we want to
@@ -155,9 +143,9 @@ export class MemberSession {
       this.memberId = memberId;
       this.server.registerChannel(memberId, this.channel);
     } catch (err: any) {
+      // TODO: Need a proper error message.
       console.log(err);
       this.channel.emit("connectionFailed", { message: "" });
-      console.log(`[${this.channel.id}] sent connectionFailed`);
     }
   }
 }

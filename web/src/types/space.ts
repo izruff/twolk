@@ -215,7 +215,6 @@ export class Space {
   }
 
   private onSocketDisconnected() {
-    console.log("Space socket disconnected");
     this._spaceInitReceived = false;
     if (this._disconnectedHandler) {
       this._disconnectedHandler();
@@ -225,7 +224,6 @@ export class Space {
   }
 
   private onSocketFailed(error: { message: string }) {
-    console.log("Space socket connection failed:", error.message);
     this._spaceInitReceived = false;
     if (this._failedHandler) {
       this._failedHandler(error);
@@ -415,7 +413,6 @@ export class Space {
     clientSideSpace: ClientSideSpace }) {
     const { receivingMemberId, routerRtpCapabilities, clientSideSpace } = payload;
     if (!this._spaceInitReceived) {
-      console.log("Handling spaceInit:", payload);
       this._producerMemberId = receivingMemberId;
       this.uuid = clientSideSpace.uuid;
       this.data = clientSideSpace.data;

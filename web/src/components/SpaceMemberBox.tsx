@@ -17,10 +17,7 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
   const animationIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    console.log("useEffect triggered")
     if (!analyzer) return;
-
-    console.log("Starting visualization with analyzer:", analyzer);
 
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext('2d');

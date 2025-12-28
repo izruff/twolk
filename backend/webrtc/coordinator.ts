@@ -76,14 +76,5 @@ export class Coordinator {
     this.spaceService.start();
     this.memberService.start();
     this.spaceUpdateDispatcher.start();
-
-    // For debugging; print contents of all maps every 5 seconds
-    // setInterval(() => {
-    //   console.log("=== Coordinator State ===");
-    //   console.log("Spaces:", this.spaceService.spaces);
-    //   console.log("Members:", this.memberService.members);
-    //   console.log("Routers:", this.routerAllocator.routers);
-    //   console.log("Transports:", this.transportAllocator.transports);
-    // }, 5000);
   }
 }
