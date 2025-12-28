@@ -18,11 +18,13 @@ guarantee the space is empty before removing it.
 
 */
 
+import { randomUUID } from "node:crypto";
+
 import type {
   IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
 import type { RouterAllocator } from "./router-allocator.ts";
-import type { Space } from "./domain.ts";
+import type { Space, SpaceData } from "./domain.ts";
 import type { IStore } from "./store-port.ts";
 
 
@@ -49,6 +51,10 @@ export class SpaceService {
 
   start() {
     this._cancelConsumers.push(
+      this.bus.consume("createSpaceRequest",
+        this.onCreateSpaceRequest.bind(this)),
+      this.bus.consume("readSpaceRequest",
+        this.onReadSpaceRequest.bind(this)),
       this.bus.consume("subscribeToSpaceRequest",
         this.onSubscribeToSpaceRequest.bind(this)),
       this.bus.consume("unsubscribeFromSpaceRequest",
@@ -114,6 +120,20 @@ export class SpaceService {
     return space;
   }
 
+  // Creates a space with caller-supplied data and a freshly generated uuid.
+  // The router is not allocated here — that still happens lazily on the
+  // first subscribe.
+  create(data: SpaceData): string {
+    const uuid = randomUUID();
+    const space: Space = {
+      uuid, primaryRouter: null,
+      data: structuredClone(data),
+      members: new Map(),
+    };
+    this.spaces.set(uuid, space);
+    return uuid;
+  }
+
   // Callers must ensure the space has no remaining members before removing it.
   remove(uuid: string) {
     const space = this.spaces.get(uuid);
@@ -125,6 +145,22 @@ export class SpaceService {
     }
     this.spaces.delete(uuid);
   }
+
+  onCreateSpaceRequest: QueueConsumerCallback<"createSpaceRequest"> =
+    ({ data }, ack, _nack) => {
+      const uuid = this.create(data);
+      ack({ uuid });
+    };
+
+  onReadSpaceRequest: QueueConsumerCallback<"readSpaceRequest"> =
+    ({ uuid }, ack, nack) => {
+      const space = this.spaces.get(uuid);
+      if (space === undefined) {
+        nack(new Error("space not found"));
+        return;
+      }
+      ack({ data: structuredClone(space.data) });
+    };
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
     ({ serverId, uuid }, ack, nack) => {

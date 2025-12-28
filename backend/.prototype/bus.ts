@@ -17,7 +17,7 @@ import type mediasoup from "mediasoup";
 import type mediasoupClient from "mediasoup-client";
 
 import type {
-  MemberData, MemberState, ClientSideSpace
+  SpaceData, MemberData, MemberState, ClientSideSpace
 } from "./domain.ts";
 
 
@@ -28,6 +28,13 @@ import type {
 // Currently, if something fails, the worker or signaling server throws an
 // error or process exits.
 export type QueuePayloadTypeMap = {
+  // CRUD on the Space object, forwarded from the HTTP server.
+  createSpaceRequest: {
+    data: SpaceData,
+  };
+  readSpaceRequest: {
+    uuid: string,
+  };
   // Requests from coordinator to create a new router for a space
   newRouterRequest: {
     assignedId: number,
@@ -63,6 +70,12 @@ export type QueuePayloadTypeMap = {
 }
 
 export type QueueResponseTypeMap = {
+  createSpaceRequest: {
+    uuid: string,
+  };
+  readSpaceRequest: {
+    data: SpaceData,
+  };
   newRouterRequest: {
     rtpCapabilities: mediasoup.types.RtpCapabilities,
   };
@@ -244,6 +257,8 @@ export class InProcessBus implements IMessageBus {
   constructor() {
     // TODO: Automate this set instantiations
     this.queueConsumerCallbacks = {
+      createSpaceRequest: new Set(),
+      readSpaceRequest: new Set(),
       newRouterRequest: new Set(),
       newWebRtcTransportRequest: new Set(),
       subscribeToSpaceRequest: new Set(),
