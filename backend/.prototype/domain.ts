@@ -21,8 +21,11 @@ export interface SpaceData {
   description: string;
 }
 
+export type SpaceStatus = "initialized" | "running" | "ended";
+
 export interface Space {
   uuid: string;
+  status: SpaceStatus;
   // TODO: This should be a map in the future
   primaryRouter: Router | null;
   data: SpaceData;

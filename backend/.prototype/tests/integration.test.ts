@@ -6,6 +6,11 @@ FakeClientChannelAcceptor — i.e. all of the real backend code except
 mediasoup and Socket.IO. Drives it with simulated client connections
 and asserts on the events the server emitted back to each channel.
 
+Spaces are no longer created on-demand, so each test first creates one
+via the createSpaceRequest bus message — the same request the
+frontend-facing HTTP server forwards in production — and joins the
+returned uuid.
+
 */
 
 import { describe, it, expect } from "vitest";
@@ -79,11 +84,25 @@ function newChannel(spaceUuid: string, name: string): Channel {
 }
 
 
+// Create a space via the bus (what the HTTP server forwards) and return
+// its generated uuid.
+function createSpace(
+  bus: InProcessBus,
+  data = { name: "Test", description: "integration" },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    bus.publish("createSpaceRequest", { data },
+      ({ uuid }) => resolve(uuid), reject);
+  });
+}
+
+
 describe("backend integration (with fakes)", () => {
   it("a single member joins and receives spaceInit", async () => {
-    const { server, acceptor } = buildSystem();
+    const { bus, server, acceptor } = buildSystem();
 
-    const channelA = newChannel("space-1", "A");
+    const uuid = await createSpace(bus);
+    const channelA = newChannel(uuid, "A");
     acceptor.inject(channelA);
 
     await waitFor(() => channelA.emitted.some(
@@ -94,7 +113,7 @@ describe("backend integration (with fakes)", () => {
     expect(spaceInit).toBeDefined();
 
     const content = spaceInit?.args[1];
-    expect(content.clientSideSpace.uuid).toBe("space-1");
+    expect(content.clientSideSpace.uuid).toBe(uuid);
     expect(content.clientSideSpace.members).toHaveLength(1);
     expect(content.receivingMemberId).toBe(content.clientSideSpace.members[0].id);
 
@@ -103,10 +122,11 @@ describe("backend integration (with fakes)", () => {
   });
 
   it("two members in the same space see each other", async () => {
-    const { acceptor } = buildSystem();
+    const { bus, acceptor } = buildSystem();
 
-    const channelA = newChannel("space-2", "A");
-    const channelB = newChannel("space-2", "B");
+    const uuid = await createSpace(bus);
+    const channelA = newChannel(uuid, "A");
+    const channelB = newChannel(uuid, "B");
 
     acceptor.inject(channelA);
     await waitFor(() => channelA.emitted.some(
@@ -132,9 +152,10 @@ describe("backend integration (with fakes)", () => {
   });
 
   it("worker allocates a router for the first member to join a space", async () => {
-    const { acceptor, mediaWorker } = buildSystem();
+    const { bus, acceptor, mediaWorker } = buildSystem();
 
-    const channelA = newChannel("space-3", "A");
+    const uuid = await createSpace(bus);
+    const channelA = newChannel(uuid, "A");
     acceptor.inject(channelA);
     await waitFor(() => channelA.emitted.some(
       (m) => m.event === "memberEvent" && m.args[0] === "spaceInit"));
@@ -148,10 +169,11 @@ describe("backend integration (with fakes)", () => {
   });
 
   it("second member joining triggers two consumer transports", async () => {
-    const { acceptor, mediaWorker } = buildSystem();
+    const { bus, acceptor, mediaWorker } = buildSystem();
 
-    const channelA = newChannel("space-4", "A");
-    const channelB = newChannel("space-4", "B");
+    const uuid = await createSpace(bus);
+    const channelA = newChannel(uuid, "A");
+    const channelB = newChannel(uuid, "B");
 
     acceptor.inject(channelA);
     await waitFor(() => channelA.emitted.some(
@@ -170,10 +192,11 @@ describe("backend integration (with fakes)", () => {
 
   it("on channel close, the member is removed and remaining members see memberLeave",
     async () => {
-      const { acceptor, server } = buildSystem();
+      const { bus, acceptor, server } = buildSystem();
 
-      const channelA = newChannel("space-5", "A");
-      const channelB = newChannel("space-5", "B");
+      const uuid = await createSpace(bus);
+      const channelA = newChannel(uuid, "A");
+      const channelB = newChannel(uuid, "B");
 
       acceptor.inject(channelA);
       await waitFor(() => channelA.emitted.some(

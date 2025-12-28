@@ -167,13 +167,9 @@ export class MemberService {
       // Clean up member
       this.remove(id);
 
-      // Clean up space if it has met ending conditions and no server is
+      // End the space if this was the last member and no server is
       // subscribed to it.
-      // TODO: This logic is only for spaces removed upon last member leaving.
-      // We need to handle other kinds of spaces in the future.
-      if (space.members.size === 0 && !this.spaceService.hasSubscribers(space.uuid)) {
-        this.spaceService.remove(space.uuid);
-      }
+      this.spaceService.endIfEmpty(space.uuid);
 
       ack();
 

@@ -1,7 +1,8 @@
 /*
 
-Unit tests for SpaceService — subscribe/unsubscribe bookkeeping and the
-implicit space-create on first subscribe.
+Unit tests for SpaceService — create/read CRUD plus the subscribe/
+unsubscribe lifecycle and its status transitions
+(initialized -> running -> ended).
 
 Wires SpaceService against a real InProcessBus and a real
 RouterAllocator + TransportAllocator backed by a FakeMediaWorker, so
@@ -21,7 +22,6 @@ import { InMemoryStore } from "../in-memory-store.ts";
 import { ProcessCounterIdGenerator } from "../id-gen-process.ts";
 import { FakeMediaWorker } from "../test-fakes/fake-media-worker.ts";
 import type { Space } from "../domain.ts";
-import { waitFor } from "./test-utils.ts";
 
 
 function buildSystem() {
@@ -47,82 +47,128 @@ function buildSystem() {
 }
 
 
-describe("SpaceService", () => {
-  it("creates a space and allocates its router on first subscribe", async () => {
+function createSpace(
+  bus: InProcessBus,
+  data = { name: "Test", description: "a test space" },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    bus.publish("createSpaceRequest", { data },
+      ({ uuid }) => resolve(uuid), reject);
+  });
+}
+
+function subscribe(bus: InProcessBus, serverId: number, uuid: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    bus.publish("subscribeToSpaceRequest", { serverId, uuid }, resolve, reject);
+  });
+}
+
+function unsubscribe(bus: InProcessBus, serverId: number, uuid: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    bus.publish("unsubscribeFromSpaceRequest", { serverId, uuid },
+      () => resolve(), reject);
+  });
+}
+
+
+describe("SpaceService CRUD", () => {
+  it("creates an initialized space and reads its data back", async () => {
+    const { bus, spaceStore } = buildSystem();
+
+    const uuid = await createSpace(bus, { name: "Room", description: "hi" });
+
+    const stored = spaceStore.get(uuid)!;
+    expect(stored.status).toBe("initialized");
+    expect(stored.data).toEqual({ name: "Room", description: "hi" });
+
+    const read = await new Promise<any>((resolve, reject) => {
+      bus.publish("readSpaceRequest", { uuid }, resolve, reject);
+    });
+    expect(read.data).toEqual({ name: "Room", description: "hi" });
+  });
+
+  it("rejects a read for a space that does not exist", async () => {
+    const { bus } = buildSystem();
+    await expect(new Promise((resolve, reject) => {
+      bus.publish("readSpaceRequest", { uuid: "nope" }, resolve, reject);
+    })).rejects.toThrow("space not found");
+  });
+});
+
+
+describe("SpaceService subscribe/unsubscribe", () => {
+  it("first subscribe allocates the router and promotes to running", async () => {
     const { bus, spaceService, spaceStore, mediaWorker } = buildSystem();
 
-    let resp: any = null;
-    bus.publish("subscribeToSpaceRequest", { serverId: 0, uuid: "s-1" },
-      (r: any) => { resp = r; },
-      (e) => { throw e; });
+    const uuid = await createSpace(bus);
+    expect(spaceStore.get(uuid)!.status).toBe("initialized");
 
-    await waitFor(() => resp !== null);
+    const resp = await subscribe(bus, 0, uuid);
 
-    expect(spaceStore.has("s-1")).toBe(true);
-    expect(spaceService.isSubscribed(0, "s-1")).toBe(true);
-    expect(spaceService.hasSubscribers("s-1")).toBe(true);
+    expect(spaceService.isSubscribed(0, uuid)).toBe(true);
+    expect(spaceService.hasSubscribers(uuid)).toBe(true);
+    expect(spaceStore.get(uuid)!.status).toBe("running");
     expect(mediaWorker.routers).toHaveLength(1);
-    expect(resp.clientSideSpace.uuid).toBe("s-1");
+    expect(resp.clientSideSpace.uuid).toBe(uuid);
     expect(resp.clientSideSpace.members).toEqual([]);
     expect(resp.routerRtpCapabilities).toBeDefined();
   });
 
-  it("a second subscribe to an existing space reuses the router", async () => {
+  it("a second subscribe to a running space reuses the router", async () => {
     const { bus, spaceService, mediaWorker } = buildSystem();
 
-    await new Promise((resolve, reject) => {
-      bus.publish("subscribeToSpaceRequest", { serverId: 0, uuid: "s-2" },
-        () => resolve(undefined), reject);
-    });
-    await new Promise((resolve, reject) => {
-      bus.publish("subscribeToSpaceRequest", { serverId: 1, uuid: "s-2" },
-        () => resolve(undefined), reject);
-    });
+    const uuid = await createSpace(bus);
+    await subscribe(bus, 0, uuid);
+    await subscribe(bus, 1, uuid);
 
     expect(mediaWorker.routers).toHaveLength(1);
-    expect(spaceService.isSubscribed(0, "s-2")).toBe(true);
-    expect(spaceService.isSubscribed(1, "s-2")).toBe(true);
+    expect(spaceService.isSubscribed(0, uuid)).toBe(true);
+    expect(spaceService.isSubscribed(1, uuid)).toBe(true);
   });
 
-  it("unsubscribe drops the subscription and cleans up if empty", async () => {
+  it("unsubscribe ends the space (keeps the record) when empty", async () => {
     const { bus, spaceService, spaceStore } = buildSystem();
 
-    await new Promise((resolve, reject) => {
-      bus.publish("subscribeToSpaceRequest", { serverId: 0, uuid: "s-3" },
-        () => resolve(undefined), reject);
-    });
-    expect(spaceStore.has("s-3")).toBe(true);
+    const uuid = await createSpace(bus);
+    await subscribe(bus, 0, uuid);
+    expect(spaceStore.get(uuid)!.status).toBe("running");
 
-    await new Promise((resolve, reject) => {
-      bus.publish("unsubscribeFromSpaceRequest", { serverId: 0, uuid: "s-3" },
-        () => resolve(undefined), reject);
-    });
+    await unsubscribe(bus, 0, uuid);
 
-    expect(spaceService.isSubscribed(0, "s-3")).toBe(false);
-    expect(spaceService.hasSubscribers("s-3")).toBe(false);
-    // Space is empty and has no subscribers — it should be removed.
-    expect(spaceStore.has("s-3")).toBe(false);
+    expect(spaceService.isSubscribed(0, uuid)).toBe(false);
+    expect(spaceService.hasSubscribers(uuid)).toBe(false);
+    // The space is no longer destroyed — it is kept around as "ended".
+    expect(spaceStore.has(uuid)).toBe(true);
+    expect(spaceStore.get(uuid)!.status).toBe("ended");
   });
 
-  it("unsubscribe with another server still subscribed keeps the space", async () => {
+  it("unsubscribe with another server still subscribed keeps it running", async () => {
     const { bus, spaceService, spaceStore } = buildSystem();
 
-    await new Promise((resolve, reject) => {
-      bus.publish("subscribeToSpaceRequest", { serverId: 0, uuid: "s-4" },
-        () => resolve(undefined), reject);
-    });
-    await new Promise((resolve, reject) => {
-      bus.publish("subscribeToSpaceRequest", { serverId: 1, uuid: "s-4" },
-        () => resolve(undefined), reject);
-    });
+    const uuid = await createSpace(bus);
+    await subscribe(bus, 0, uuid);
+    await subscribe(bus, 1, uuid);
 
-    await new Promise((resolve, reject) => {
-      bus.publish("unsubscribeFromSpaceRequest", { serverId: 0, uuid: "s-4" },
-        () => resolve(undefined), reject);
-    });
+    await unsubscribe(bus, 0, uuid);
 
-    expect(spaceService.isSubscribed(0, "s-4")).toBe(false);
-    expect(spaceService.isSubscribed(1, "s-4")).toBe(true);
-    expect(spaceStore.has("s-4")).toBe(true);
+    expect(spaceService.isSubscribed(0, uuid)).toBe(false);
+    expect(spaceService.isSubscribed(1, uuid)).toBe(true);
+    expect(spaceStore.get(uuid)!.status).toBe("running");
+  });
+
+  it("rejects subscribing to a space that does not exist", async () => {
+    const { bus } = buildSystem();
+    await expect(subscribe(bus, 0, "missing")).rejects.toThrow("space not found");
+  });
+
+  it("rejects subscribing to a space that has ended", async () => {
+    const { bus, spaceStore } = buildSystem();
+
+    const uuid = await createSpace(bus);
+    await subscribe(bus, 0, uuid);
+    await unsubscribe(bus, 0, uuid);
+    expect(spaceStore.get(uuid)!.status).toBe("ended");
+
+    await expect(subscribe(bus, 0, uuid)).rejects.toThrow("not joinable");
   });
 });

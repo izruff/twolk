@@ -1,6 +1,5 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test';
-
-const SPACE_URL = '/space/test';
+import { createSpace, spaceUrl } from './helpers';
 
 // Each page must perform a user gesture so the AudioContext resumes and the
 // transport factory finishes initializing.
@@ -162,7 +161,9 @@ async function waitForConsumerReady(page: Page) {
   );
 }
 
-test('two users in the same space hear each other', async ({ browser }) => {
+test('two users in the same space hear each other', async ({ browser, request }) => {
+  const SPACE_URL = spaceUrl(await createSpace(request));
+
   const ctxA: BrowserContext = await browser.newContext({
     ignoreHTTPSErrors: true,
     permissions: ['microphone'],

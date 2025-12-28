@@ -8,13 +8,17 @@ Owns:
 - `spaceSubscriptions` (serverId → set of uuids) and the inverse
   `spaceToSubscribedMap` (uuid → set of serverIds)
 
-Handles the bus requests `subscribeToSpaceRequest` and
-`unsubscribeFromSpaceRequest`. Subscribing implicitly creates a space the
-first time it's referenced and allocates its primary router.
+Handles the bus requests `createSpaceRequest`, `readSpaceRequest`,
+`subscribeToSpaceRequest`, and `unsubscribeFromSpaceRequest`. Spaces are
+created explicitly via `createSpaceRequest` (forwarded from the HTTP
+server); subscribing no longer creates them.
 
-Removal is just dropping the space from the maps plus releasing its
-router. Members tied to the space are *not* iterated here — callers
-guarantee the space is empty before removing it.
+A space moves through three statuses: "initialized" (created, nobody has
+joined), "running" (at least one subscribe has promoted it and allocated
+its router), and "ended" (last subscriber left). The first subscribe
+allocates the primary router and promotes initialized -> running; the last
+unsubscribe demotes running -> ended. Subscribing to a missing or ended
+space is rejected.
 
 */
 
@@ -107,26 +111,13 @@ export class SpaceService {
     }
   }
 
-  add(uuid: string): Space {
-    const space: Space = {
-      uuid, primaryRouter: null,
-      data: {
-        name: "PLACEHOLDER",  // TODO: Need to retrieve data from DB
-        description: "PLACEHOLDER",
-      },
-      members: new Map(),
-    };
-    this.spaces.set(uuid, space);
-    return space;
-  }
-
   // Creates a space with caller-supplied data and a freshly generated uuid.
-  // The router is not allocated here — that still happens lazily on the
-  // first subscribe.
+  // It starts "initialized"; the router is allocated lazily on the first
+  // subscribe.
   create(data: SpaceData): string {
     const uuid = randomUUID();
     const space: Space = {
-      uuid, primaryRouter: null,
+      uuid, status: "initialized", primaryRouter: null,
       data: structuredClone(data),
       members: new Map(),
     };
@@ -134,16 +125,26 @@ export class SpaceService {
     return uuid;
   }
 
-  // Callers must ensure the space has no remaining members before removing it.
-  remove(uuid: string) {
+  // Ends a space (running -> ended) once it is empty and no server is
+  // subscribed to it. Called both when the last member leaves
+  // (member-service) and when the last server unsubscribes. The space
+  // record is kept around so it can still be read as "ended".
+  // TODO: This logic is only for spaces ended upon last member leaving.
+  // We need to handle other kinds of spaces in the future.
+  endIfEmpty(uuid: string) {
     const space = this.spaces.get(uuid);
     if (space === undefined) {
       return;
     }
-    if (space.primaryRouter !== null) {
-      this.routerAllocator.remove(space.primaryRouter.id);
+    if (space.members.size === 0 && !this.hasSubscribers(uuid)) {
+      if (space.status === "running") {
+        space.status = "ended";
+      } else {
+        // A space reaching zero subscribers should always be "running".
+        console.log("warning: ending space " + uuid +
+          " with unexpected status " + space.status);
+      }
     }
-    this.spaces.delete(uuid);
   }
 
   onCreateSpaceRequest: QueueConsumerCallback<"createSpaceRequest"> =
@@ -164,9 +165,19 @@ export class SpaceService {
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =
     ({ serverId, uuid }, ack, nack) => {
+      const space = this.spaces.get(uuid);
+      if (space === undefined) {
+        nack(new Error("space not found"));
+        return;
+      }
+      if (space.status !== "initialized" && space.status !== "running") {
+        // Ended (or any non-joinable status): cannot subscribe.
+        nack(new Error("space is not joinable"));
+        return;
+      }
+
       // Callback function to subscribe and ack after the space is ready
       const subscribeAndAckFn = () => {
-        const space = this.spaces.get(uuid)!;
         if (space.primaryRouter === null ||
           space.primaryRouter.rtpCapabilities === null) {
             // This should not happen because routerAllocator.allocate waits
@@ -193,15 +204,12 @@ export class SpaceService {
         });
       }
 
-      // TODO: This logic is only for spaces created upon joining.
-      // We need to handle other kinds of spaces in the future.
-      if (!this.spaces.has(uuid)) {
-        const space = this.add(uuid);
-
-        // Allocate a router for this space. For now, we assume each space
-        // uses exactly one router, and only one worker is present. In the
-        // future, we might want to have multiple routers per space for
-        // load balancing.
+      if (space.status === "initialized") {
+        // First subscribe: promote to running and allocate the router.
+        // For now, we assume each space uses exactly one router, and only
+        // one worker is present. In the future, we might want multiple
+        // routers per space for load balancing.
+        space.status = "running";
         this.routerAllocator.allocate(space)
           .then((_) => {
             subscribeAndAckFn();
@@ -211,6 +219,7 @@ export class SpaceService {
             throw new Error("newRouterRequest nacked: " + e.message);
           });
       } else {
+        // Already running: the router is allocated.
         subscribeAndAckFn();
       }
     }
@@ -224,14 +233,7 @@ export class SpaceService {
       }
 
       this.unsubscribe(serverId, uuid);
-
-      // Clean up space if it has met ending conditions and no server is
-      // subscribed to it.
-      // TODO: This logic is only for spaces removed upon last member leaving.
-      // We need to handle other kinds of spaces in the future.
-      if (space.members.size === 0 && !this.hasSubscribers(uuid)) {
-        this.remove(uuid);
-      }
+      this.endIfEmpty(uuid);
 
       ack();
     };

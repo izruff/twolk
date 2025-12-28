@@ -1,6 +1,5 @@
 import { test, expect, type Page, type BrowserContext, type Browser } from '@playwright/test';
-
-const SPACE_URL = '/space/test';
+import { createSpace, spaceUrl } from './helpers';
 
 // Each context represents a separate user.
 interface User {
@@ -30,8 +29,8 @@ async function clickSomewhere(page: Page) {
   await page.locator('body').click();
 }
 
-async function joinUser(u: User) {
-  await u.page.goto(SPACE_URL);
+async function joinUser(u: User, spaceUrl: string) {
+  await u.page.goto(spaceUrl);
   await clickSomewhere(u.page);
 }
 
@@ -251,7 +250,10 @@ async function assertObserverState(
 
 test('observer correctly tracks four members across join/leave transitions', async ({
   browser,
+  request,
 }) => {
+  const SPACE_URL = spaceUrl(await createSpace(request));
+
   // X: in room before observer, stays
   // Y: in room before observer, leaves before observer
   // O: the observer
@@ -264,25 +266,25 @@ test('observer correctly tracks four members across join/leave transitions', asy
   const W = await makeUser(browser, 'W');
 
   // Step 1: X joins (alone)
-  await joinUser(X);
+  await joinUser(X, SPACE_URL);
   await waitForMemberCount(X.page, 1);
 
   // Step 2: Y joins
-  await joinUser(Y);
+  await joinUser(Y, SPACE_URL);
   await waitForMemberCount(Y.page, 2);
   // X also sees Y now
   await waitForMemberCount(X.page, 2);
 
   // Step 3: Observer joins — should see X and Y as existing members.
-  await joinUser(O);
+  await joinUser(O, SPACE_URL);
   await assertObserverState(O.page, 'after O joins (X,Y already present)', 3);
 
   // Step 4: Z joins after observer.
-  await joinUser(Z);
+  await joinUser(Z, SPACE_URL);
   await assertObserverState(O.page, 'after Z joins', 4);
 
   // Step 5: W joins after observer.
-  await joinUser(W);
+  await joinUser(W, SPACE_URL);
   await assertObserverState(O.page, 'after W joins', 5);
 
   // Step 6: W leaves before observer.
