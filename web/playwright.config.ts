@@ -9,7 +9,7 @@ export default defineConfig({
   webServer: [
     {
       command: 'npm run start',
-      cwd: '../backend/webrtc',
+      cwd: '../backend/.prototype',
       url: 'https://localhost:3000/socket.io/?EIO=4&transport=polling',
       reuseExistingServer: true,
       ignoreHTTPSErrors: true,
