@@ -18,6 +18,7 @@ import type mediasoupClient from "mediasoup-client";
 
 export interface SpaceData {
   name: string;
+  description: string;
 }
 
 export interface Space {

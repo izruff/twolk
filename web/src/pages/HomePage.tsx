@@ -1,24 +1,17 @@
 import { useState } from 'react';
 import {
-  Card, Button, Stack, Group, ActionIcon, Box, Flex, Modal, Select, Switch, TextInput, Menu
+  Card, Button, Stack, Group, ActionIcon, Box, Flex, Modal, TextInput, Menu
 } from '@mantine/core';
 import { IconSettings, IconHistory, IconBrandGithub, IconExternalLink } from '@tabler/icons-react';
-import { DateTimePicker, TimeInput } from '@mantine/dates';
 import { useForm } from '@mantine/form';
 
 interface CreateFormValues {
-  password: string,
-  startType: "join" | "exact",
-  startDatetime: string | null,
-  joinImmediately: boolean,
-  endType: "leave" | "exact",
-  endDatetime: string | null,
-  delayTime: string | null,
+  spaceName: string;
+  spaceDescription: string;
 }
 
 interface ArchiveFormValues {
   archiveId: string,
-  password: string,
 }
 
 // Dummy recent spaces data
@@ -49,29 +42,16 @@ function HomePage() {
     initialValues: {
       spaceName: '',
       spaceDescription: '',
-      password: '',
-      startType: 'join',
-      startDatetime: null,
-      joinImmediately: false,
-      endType: 'leave',
-      endDatetime: null,
-      delayTime: null,
-    } as CreateFormValues & { spaceName: string; spaceDescription: string },
+    } as CreateFormValues,
     validate: {
       spaceName: value => value.trim().length < 2 ? 'Space name must be at least 2 characters' : null,
-      password: value => value.trim().length < 4 ? 'Password must be at least 4 characters' : null,
     },
   });
 
   const archiveForm = useForm({
     initialValues: {
       archiveId: '',
-      password: '',
-    },
-    validate: {
-      archiveId: value => value.trim().length < 2 ? 'Archive ID must be at least 2 characters' : null,
-      password: value => value.trim().length < 4 ? 'Password must be at least 4 characters' : null,
-    },
+    } as ArchiveFormValues,
   });
 
   const handleCreateSubmit = async (values: CreateFormValues) => {
@@ -172,14 +152,6 @@ function HomePage() {
                 {...archiveForm.getInputProps('archiveId')}
                 required
               />
-              <TextInput
-                label="Password"
-                description="Password for archive access."
-                placeholder="Enter password"
-                type="password"
-                {...archiveForm.getInputProps('password')}
-                required
-              />
               <Button type="submit" loading={archiveLoading} fullWidth>
                 Find
               </Button>
@@ -202,68 +174,6 @@ function HomePage() {
               placeholder="Enter space description"
               {...form.getInputProps('spaceDescription')}
             />
-            <TextInput
-              label="Admin Password"
-              description="Password for admin control."
-              placeholder="Enter password"
-              type="password"
-              {...form.getInputProps('password')}
-              required
-            />
-            <Select
-              label="Start Method"
-              description="When should the space start?"
-              data={[
-                { value: 'join', label: 'When someone joins' },
-                { value: 'exact', label: 'Exact datetime' },
-              ]}
-              {...form.getInputProps('startType')}
-              required
-            />
-            {form.values.startType === 'join' && (
-              <Switch
-                label="Join immediately after creating"
-                checked={form.values.joinImmediately}
-                onChange={event => form.setFieldValue('joinImmediately', event.currentTarget.checked)}
-              />
-            )}
-            {form.values.startType === 'exact' && (
-              <DateTimePicker
-                label="Start Datetime"
-                description="Select the exact start date and time."
-                value={form.values.startDatetime}
-                onChange={value => form.setFieldValue('startDatetime', value)}
-                required
-              />
-            )}
-            <Select
-              label="End Method"
-              description="When should the space end?"
-              data={[
-                { value: 'leave', label: 'When everyone leaves' },
-                { value: 'exact', label: 'Exact datetime' },
-              ]}
-              {...form.getInputProps('endType')}
-              required
-            />
-            {form.values.endType === 'leave' && (
-              <TimeInput
-                label="Delay Time"
-                description="Time to wait after everyone leaves before ending the space."
-                value={form.values.delayTime || undefined}
-                onChange={event => form.setFieldValue('delayTime', event.currentTarget.value)}
-                required
-              />
-            )}
-            {form.values.endType === 'exact' && (
-              <DateTimePicker
-                label="End Datetime"
-                description="Select the exact end date and time."
-                value={form.values.endDatetime}
-                onChange={value => form.setFieldValue('endDatetime', value)}
-                required
-              />
-            )}
             <div style={{ fontSize: 13, color: '#888', marginBottom: 8, textAlign: 'center' }}>
               By creating a space, you agree to follow the community guidelines and understand that spaces may be monitored for safety and compliance.
             </div>

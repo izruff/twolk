@@ -106,6 +106,7 @@ export class SpaceService {
       uuid, primaryRouter: null,
       data: {
         name: "PLACEHOLDER",  // TODO: Need to retrieve data from DB
+        description: "PLACEHOLDER",
       },
       members: new Map(),
     };
