@@ -301,7 +301,10 @@ export class Space {
 
   updateProducerMemberState(newState: Partial<MemberStateFromClient>) {
     this._producerMember.updateState(newState);
-    this._socket.updateMemberState(newState);
+    this.notifySnapshotUpdate();
+    this._socket.updateMemberState(newState).catch((err) => {
+      console.warn("failed to send member state update:", err);
+    });
   }
 
   onMemberJoin(handler: (memberId: number) => void) {

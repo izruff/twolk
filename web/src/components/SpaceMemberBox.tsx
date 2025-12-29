@@ -94,8 +94,8 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
           size={20}
           style={{
             position: 'absolute',
-            top: 12,
-            right: 12,
+            bottom: 12,
+            left: 12,
             color: isSelf ? '#00bcd4' : '#999',
           }}
         />

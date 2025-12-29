@@ -10,7 +10,6 @@ import type { MemberClientEventType } from '../types/member';
 
 
 function SpacePage() {
-  const [muted, setMuted] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -205,6 +204,20 @@ function SpacePage() {
     );
   }
 
+  const selfMuted = snapshot.members.find(
+    (m) => m.id === snapshot.producer.id,
+  )?.state.isMuted ?? false;
+
+  // Muting stops audio from going out (track.enabled = false) and tells the
+  // server so other members' member boxes reflect it.
+  const toggleMute = () => {
+    const newMuted = !selfMuted;
+    if (userMediaTrack) {
+      userMediaTrack.enabled = !newMuted;
+    }
+    space.updateProducerMemberState({ isMuted: newMuted });
+  };
+
   return (
     <Box style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <Stack justify="center" align="center" style={{ flex: 1, width: '100%' }}>
@@ -229,12 +242,12 @@ function SpacePage() {
         <Group justify="center" gap="xl">
           <ActionIcon
             size="xl"
-            variant={muted ? 'light' : 'filled'}
-            color={muted ? 'gray' : 'cyan'}
-            onClick={() => setMuted((m) => !m)}
-            aria-label={muted ? 'Unmute' : 'Mute'}
+            variant={selfMuted ? 'light' : 'filled'}
+            color={selfMuted ? 'gray' : 'cyan'}
+            onClick={toggleMute}
+            aria-label={selfMuted ? 'Unmute' : 'Mute'}
           >
-            {muted ? <IconMicrophoneOff size={28} /> : <IconMicrophone size={28} />}
+            {selfMuted ? <IconMicrophoneOff size={28} /> : <IconMicrophone size={28} />}
           </ActionIcon>
           <Button leftSection={<IconShare size={20} />} size="md" onClick={() => setShareOpen(true)}>
             Share
