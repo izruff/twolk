@@ -29,12 +29,15 @@ export class FrontendFacingHttpServer {
   bus: IMessageBus
   port: number
   tlsOptions: TlsOptions | null
+  allowedOrigin: string
   server: http.Server | null = null
 
-  constructor(bus: IMessageBus, port: number, tlsOptions: TlsOptions | null) {
+  constructor(bus: IMessageBus, port: number, tlsOptions: TlsOptions | null,
+    allowedOrigin: string) {
     this.bus = bus;
     this.port = port;
     this.tlsOptions = tlsOptions;
+    this.allowedOrigin = allowedOrigin;
   }
 
   start() {
@@ -50,6 +53,18 @@ export class FrontendFacingHttpServer {
   }
 
   handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    // CORS: the frontend is served from a different origin (port).
+    res.setHeader("Access-Control-Allow-Origin", this.allowedOrigin);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      // Preflight request — headers above are all the browser needs.
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     const url = new URL(req.url ?? "/", `http://localhost:${this.port}`);
 
     if (req.method === "POST" && url.pathname === "/space") {

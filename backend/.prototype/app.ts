@@ -11,7 +11,7 @@ import { SfuWorker } from "./worker.ts";
 import { Coordinator } from "./coordinator.ts";
 import { MediasoupMediaWorker } from "./media-mediasoup.ts";
 
-import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE, SPACE_HTTP_PORT } from "./utils/constants.ts";
+import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE, SPACE_HTTP_PORT, WEB_ORIGIN } from "./utils/constants.ts";
 import type { TlsOptions } from "./utils/tls.ts";
 
 import fs from "fs";
@@ -42,7 +42,7 @@ const signalingServer = SignalingServer.create(
   tlsOptions,
   {
     cors: {
-      origin: "http://localhost:5173",
+      origin: WEB_ORIGIN,
       methods: ["GET", "POST"],
       credentials: true
     },
@@ -50,7 +50,7 @@ const signalingServer = SignalingServer.create(
   3000,
   bus,
 );
-const httpServer = new FrontendFacingHttpServer(bus, SPACE_HTTP_PORT, tlsOptions);
+const httpServer = new FrontendFacingHttpServer(bus, SPACE_HTTP_PORT, tlsOptions, WEB_ORIGIN);
 const mediaWorker = await MediasoupMediaWorker.create(SFU_WORKER_PORT_RANGE);
 const sfuWorker = new SfuWorker(mediaWorker, bus);
 

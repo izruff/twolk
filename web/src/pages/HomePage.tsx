@@ -4,6 +4,9 @@ import {
 } from '@mantine/core';
 import { IconSettings, IconHistory, IconBrandGithub, IconExternalLink } from '@tabler/icons-react';
 import { useForm } from '@mantine/form';
+import { useNavigate } from 'react-router';
+
+import { REST_API_BASE_URL } from '../constants/url';
 
 interface CreateFormValues {
   spaceName: string;
@@ -24,6 +27,7 @@ const recentSpaces = [
 ];
 
 function HomePage() {
+  const navigate = useNavigate();
   const [colorScheme, setColorScheme] = useState<'light' | 'dark'>('light');
   const handleToggleColorScheme = () => {
     setColorScheme(prev => (prev === 'light' ? 'dark' : 'light'));
@@ -55,14 +59,26 @@ function HomePage() {
   });
 
   const handleCreateSubmit = async (values: CreateFormValues) => {
-    // TODO
     setLoading(true);
-    console.log(values);
-    setTimeout(() => {
-      setCreateOpen(false);
-      form.reset();
+    try {
+      const res = await fetch(`${REST_API_BASE_URL}/space`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: values.spaceName,
+          description: values.spaceDescription,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`failed to create space: ${res.status}`);
+      }
+      const { uuid } = await res.json();
+      navigate(`/space/${uuid}`);
+    } catch (err) {
+      console.error(err);
+      // Keep the modal open so the user can retry.
       setLoading(false);
-    }, 2000);
+    }
   };
 
   const handleArchiveSubmit = async (values: ArchiveFormValues) => {
