@@ -1,26 +1,17 @@
-import type { APIRequestContext } from '@playwright/test';
+import type { Page } from '@playwright/test';
 
-// Plain-HTTP Space CRUD server started by the backend (see app.ts).
-const HTTP_BASE = 'http://localhost:8000';
-
-// Create a space via POST /space and return its generated uuid. Spaces are
-// no longer created on-demand, so e2e tests must create one before
-// navigating to /space/{uuid}.
-export async function createSpace(
-  request: APIRequestContext,
-  data: { name: string; description: string } = {
-    name: 'E2E Space',
-    description: 'created by e2e test',
-  },
+// Create a space by driving the HomePage "Create Space" flow (open the
+// modal, fill the form, submit). The app POSTs to the backend and navigates
+// to the new space, so this leaves `page` on the space page and returns the
+// /space/{uuid} path other pages can use to join the same space.
+export async function createSpaceViaHomePage(
+  page: Page,
+  name = 'E2E Space',
 ): Promise<string> {
-  const res = await request.post(`${HTTP_BASE}/space`, { data });
-  if (!res.ok()) {
-    throw new Error(`createSpace failed: ${res.status()} ${await res.text()}`);
-  }
-  const body = await res.json();
-  return body.uuid as string;
-}
-
-export function spaceUrl(uuid: string): string {
-  return `/space/${uuid}`;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Create Space' }).click();
+  await page.getByLabel('Space Name').fill(name);
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  await page.waitForURL(/\/space\/.+/, { timeout: 20_000 });
+  return new URL(page.url()).pathname;
 }

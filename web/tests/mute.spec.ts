@@ -1,5 +1,5 @@
 import { test, expect, type Page, type BrowserContext } from '@playwright/test';
-import { createSpace, spaceUrl } from './helpers';
+import { createSpaceViaHomePage } from './helpers';
 
 async function clickSomewhere(page: Page) {
   await page.locator('body').click();
@@ -30,10 +30,7 @@ async function otherMemberMuted(page: Page): Promise<boolean | null> {
 
 test('mute disables the audio track and propagates isMuted to other members', async ({
   browser,
-  request,
 }) => {
-  const SPACE_URL = spaceUrl(await createSpace(request));
-
   const ctxA: BrowserContext = await browser.newContext({
     ignoreHTTPSErrors: true,
     permissions: ['microphone'],
@@ -45,7 +42,8 @@ test('mute disables the audio track and propagates isMuted to other members', as
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
 
-  await pageA.goto(SPACE_URL);
+  // A creates the space via the home page and lands on it; B joins via URL.
+  const SPACE_URL = await createSpaceViaHomePage(pageA);
   await clickSomewhere(pageA);
   await pageB.goto(SPACE_URL);
   await clickSomewhere(pageB);

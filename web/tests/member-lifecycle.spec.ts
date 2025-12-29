@@ -1,5 +1,5 @@
 import { test, expect, type Page, type BrowserContext, type Browser } from '@playwright/test';
-import { createSpace, spaceUrl } from './helpers';
+import { createSpaceViaHomePage } from './helpers';
 
 // Each context represents a separate user.
 interface User {
@@ -250,10 +250,7 @@ async function assertObserverState(
 
 test('observer correctly tracks four members across join/leave transitions', async ({
   browser,
-  request,
 }) => {
-  const SPACE_URL = spaceUrl(await createSpace(request));
-
   // X: in room before observer, stays
   // Y: in room before observer, leaves before observer
   // O: the observer
@@ -265,8 +262,10 @@ test('observer correctly tracks four members across join/leave transitions', asy
   const Z = await makeUser(browser, 'Z');
   const W = await makeUser(browser, 'W');
 
-  // Step 1: X joins (alone)
-  await joinUser(X, SPACE_URL);
+  // Step 1: X creates the space via the home page and joins (alone). The
+  // others join the resulting URL.
+  const SPACE_URL = await createSpaceViaHomePage(X.page);
+  await clickSomewhere(X.page);
   await waitForMemberCount(X.page, 1);
 
   // Step 2: Y joins
