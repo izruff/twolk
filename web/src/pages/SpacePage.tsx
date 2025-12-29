@@ -4,9 +4,15 @@ import { Box, Grid, Stack, Text, Button, Group, Modal, ActionIcon } from '@manti
 import { IconMicrophone, IconMicrophoneOff, IconShare, IconSettings } from '@tabler/icons-react';
 
 import { SpaceMemberBox } from '../components/SpaceMemberBox';
+import { CenteredMessage } from '../components/CenteredMessage';
 import { useSpace } from '../hooks/useSpace';
+import { REST_API_BASE_URL } from '../constants/url';
 
 import type { MemberClientEventType } from '../types/member';
+
+
+// Whether the space can be joined, derived from GET /space before connecting.
+type AccessState = 'loading' | 'available' | 'ended' | 'missing' | 'error';
 
 
 function SpacePage() {
@@ -23,6 +29,8 @@ function SpacePage() {
   const [userMediaTrack, setUserMediaTrack] = useState<MediaStreamTrack | null>(null);
 
   const spaceUuid = useParams().id!;
+
+  const [accessState, setAccessState] = useState<AccessState>('loading');
 
   const [space, snapshot] = useSpace(
     spaceUuid,
@@ -52,8 +60,26 @@ function SpacePage() {
     return analyzer;
   }
 
-  // Preparing the space
+  // Check the space exists and hasn't ended before connecting.
   useEffect(() => {
+    let cancelled = false;
+    fetch(`${REST_API_BASE_URL}/space?uuid=${encodeURIComponent(spaceUuid)}`)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.status === 404) { setAccessState('missing'); return; }
+        if (!res.ok) { setAccessState('error'); return; }
+        const body = await res.json();
+        if (cancelled) return;
+        setAccessState(body.status === 'ended' ? 'ended' : 'available');
+      })
+      .catch(() => { if (!cancelled) setAccessState('error'); });
+    return () => { cancelled = true; };
+  }, [spaceUuid]);
+
+  // Preparing the space (only once we know it is joinable)
+  useEffect(() => {
+    if (accessState !== 'available') return;
+
     space.init(
       () => { console.log("connected") },
       () => { console.log("disconnected") },
@@ -143,7 +169,7 @@ function SpacePage() {
       });
       consumerAudioRefs.current.clear();
     };
-  }, [space]);
+  }, [space, accessState]);
 
   // Wait for user interaction to resume audio context
   useEffect(() => {
@@ -165,8 +191,9 @@ function SpacePage() {
     };
   }, []);
 
-  // Requesting for user media
+  // Requesting for user media (only once the space is joinable)
   useEffect(() => {
+    if (accessState !== 'available') return;
     navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       .then((stream) => {
         const audioTrack = stream.getAudioTracks()[0];
@@ -178,7 +205,7 @@ function SpacePage() {
       .catch((err) => {
         console.error("Failed to get user media:", err);
       });
-  }, []);
+  }, [accessState]);
 
   // Set producer track once user media is ready
   useEffect(() => {
@@ -196,12 +223,22 @@ function SpacePage() {
     }
   }, [space, userMediaTrack]);
 
+  if (accessState === 'loading') {
+    return <CenteredMessage title="Loading…" />;
+  }
+  if (accessState === 'missing') {
+    return <CenteredMessage title="Space not found" detail="This space does not exist." />;
+  }
+  if (accessState === 'ended') {
+    return <CenteredMessage title="This space has ended" detail="It is no longer available to join." />;
+  }
+  if (accessState === 'error') {
+    return <CenteredMessage title="Couldn't load this space" detail="Please try again." />;
+  }
+
+  // accessState === 'available' — connecting to the signaling server.
   if (snapshot === null) {
-    return (
-      <Box style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-        <Text size="xl">Loading...</Text>
-      </Box>
-    );
+    return <CenteredMessage title="Connecting…" />;
   }
 
   const selfMuted = snapshot.members.find(

@@ -11,7 +11,7 @@ Today it only exposes Space CRUD; more resources will be added here later.
 
 Routes:
 - POST /space   body: SpaceData          -> 201 { uuid }
-- GET  /space   query: ?uuid=<uuid>      -> 200 SpaceData | 404
+- GET  /space   query: ?uuid=<uuid>      -> 200 { ...SpaceData, status } | 404
 
 Speaks https when given TlsOptions, plain http otherwise — the composition
 root decides based on ENVIRONMENT.
@@ -102,7 +102,7 @@ export class FrontendFacingHttpServer {
     }
 
     this.bus.publish("readSpaceRequest", { uuid },
-      ({ data }) => { sendJson(res, 200, data); },
+      ({ data, status }) => { sendJson(res, 200, { ...data, status }); },
       () => { sendJson(res, 404, { error: "space not found" }); });
   }
 }

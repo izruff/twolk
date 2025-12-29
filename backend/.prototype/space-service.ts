@@ -160,7 +160,7 @@ export class SpaceService {
         nack(new Error("space not found"));
         return;
       }
-      ack({ data: structuredClone(space.data) });
+      ack({ data: structuredClone(space.data), status: space.status });
     };
 
   onSubscribeToSpaceRequest: QueueConsumerCallback<"subscribeToSpaceRequest"> =

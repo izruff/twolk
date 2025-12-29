@@ -85,6 +85,7 @@ describe("SpaceService CRUD", () => {
       bus.publish("readSpaceRequest", { uuid }, resolve, reject);
     });
     expect(read.data).toEqual({ name: "Room", description: "hi" });
+    expect(read.status).toBe("initialized");
   });
 
   it("rejects a read for a space that does not exist", async () => {

@@ -17,7 +17,7 @@ import type mediasoup from "mediasoup";
 import type mediasoupClient from "mediasoup-client";
 
 import type {
-  SpaceData, MemberData, MemberState, ClientSideSpace
+  SpaceData, SpaceStatus, MemberData, MemberState, ClientSideSpace
 } from "./domain.ts";
 
 
@@ -75,6 +75,7 @@ export type QueueResponseTypeMap = {
   };
   readSpaceRequest: {
     data: SpaceData,
+    status: SpaceStatus,
   };
   newRouterRequest: {
     rtpCapabilities: mediasoup.types.RtpCapabilities,
