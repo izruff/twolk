@@ -12,12 +12,25 @@ interface SpaceMemberBoxProps {
   analyzer: AnalyserNode | null;
 }
 
+// Border thickness, in px, grows from BASE up to MAX as the member's audio
+// gets louder. BASE matches the resting border below.
+const BASE_BORDER_WIDTH = 2;
+const MAX_BORDER_WIDTH = 9;
+
 export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberBoxProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   const animationIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!analyzer) return;
+    const resetBorder = () => {
+      if (boxRef.current) boxRef.current.style.borderWidth = `${BASE_BORDER_WIDTH}px`;
+    };
+
+    if (!analyzer) {
+      resetBorder();
+      return;
+    }
 
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext('2d');
@@ -35,13 +48,23 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
       const barWidth = canvas.width / bufferLength * 2.5;
       let barHeight;
       let x = 0;
+      let sum = 0;
 
       ctx.fillStyle = isSelf ? '#00bcd4' : '#999';
 
       for (let i = 0; i < bufferLength; i++) {
+        sum += dataArray[i];
         barHeight = (dataArray[i] / 255) * canvas.height;
         ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
         x += barWidth + 1;
+      }
+
+      // Mean frequency magnitude (0..255); saturate at a fairly low value so
+      // ordinary speech, not just shouting, lights up the border.
+      const level = Math.min(1, (sum / bufferLength) / 48);
+      if (boxRef.current) {
+        const width = BASE_BORDER_WIDTH + level * (MAX_BORDER_WIDTH - BASE_BORDER_WIDTH);
+        boxRef.current.style.borderWidth = `${width}px`;
       }
 
       animationIdRef.current = requestAnimationFrame(draw);
@@ -53,15 +76,18 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
       if (animationIdRef.current !== null) {
         cancelAnimationFrame(animationIdRef.current);
       }
+      resetBorder();
     };
   }, [analyzer, canvasRef, isSelf]);
 
   return (
     <Box
+      ref={boxRef}
       style={{
         borderRadius: 20,
         background: isSelf ? '#e0f7fa' : '#f5f5f5',
-        border: isSelf ? '2px solid #00bcd4' : '1px solid #ddd',
+        border: `${BASE_BORDER_WIDTH}px solid ${isSelf ? '#00bcd4' : '#ddd'}`,
+        boxSizing: 'border-box',
         aspectRatio: '1.3/1',
         minHeight: 120,
         minWidth: 140,
