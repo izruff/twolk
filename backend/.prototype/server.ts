@@ -33,8 +33,8 @@ import type {
 import { MemberSession } from "./member-session.ts";
 import type { IStore } from "./store-port.ts";
 import { InMemoryStore } from "./in-memory-store.ts";
+import { createNodeHttpServer, type TlsOptions } from "./utils/tls.ts";
 
-import https from "node:https";
 import { Server as BaseServer, type ServerOptions } from "socket.io";
 import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
@@ -235,15 +235,16 @@ export class SignalingServer {
     this.memberIdToChannel = new Map();
   }
 
-  // Builds the underlying HTTPS + socket.io servers and the Socket.IO
+  // Builds the underlying Node + socket.io servers and the Socket.IO
   // channel acceptor but does not listen on the port yet — that happens
-  // in start(). Lets callers configure or swap collaborators before
+  // in start(). The server speaks https when given TlsOptions, http
+  // otherwise. Lets callers configure or swap collaborators before
   // binding to the network.
-  static create(serverId: number, httpsOptions: https.ServerOptions,
+  static create(serverId: number, tlsOptions: TlsOptions | null,
     ioOptions: Partial<ServerOptions>, port: number, bus: IMessageBus): SignalingServer {
-    const httpsServer = https.createServer(httpsOptions);
-    const io = new BaseServer(httpsServer, ioOptions);
-    const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpsServer, port);
+    const httpServer = createNodeHttpServer(tlsOptions);
+    const io = new BaseServer(httpServer, ioOptions);
+    const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpServer, port);
     return new SignalingServer(
       serverId, acceptor, bus,
       new InMemoryStore<string, Space>(),

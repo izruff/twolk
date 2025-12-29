@@ -13,8 +13,8 @@ Routes:
 - POST /space   body: SpaceData          -> 201 { uuid }
 - GET  /space   query: ?uuid=<uuid>      -> 200 SpaceData | 404
 
-Uses the native `http` module. HTTP vs HTTPS standardization is handled in
-a later issue.
+Speaks https when given TlsOptions, plain http otherwise — the composition
+root decides based on ENVIRONMENT.
 
 */
 
@@ -22,20 +22,23 @@ import http from "node:http";
 
 import type { IMessageBus } from "./bus.ts";
 import type { SpaceData } from "./domain.ts";
+import { createNodeHttpServer, type TlsOptions } from "./utils/tls.ts";
 
 
 export class FrontendFacingHttpServer {
   bus: IMessageBus
   port: number
+  tlsOptions: TlsOptions | null
   server: http.Server | null = null
 
-  constructor(bus: IMessageBus, port: number) {
+  constructor(bus: IMessageBus, port: number, tlsOptions: TlsOptions | null) {
     this.bus = bus;
     this.port = port;
+    this.tlsOptions = tlsOptions;
   }
 
   start() {
-    this.server = http.createServer((req, res) => {
+    this.server = createNodeHttpServer(this.tlsOptions, (req, res) => {
       this.handleRequest(req, res);
     });
     this.server.listen(this.port);

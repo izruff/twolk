@@ -4,14 +4,15 @@ Socket.IO adapter for the client-channel port. All Socket.IO-specific
 type acrobatics live here; the rest of the backend sees only
 `IClientChannel` and `IClientChannelAcceptor`.
 
-The acceptor owns the HTTPS server too, since binding to the port is
-part of "start accepting." The composition root (`app.ts`) only has
-to call `acceptor.start()`.
+The acceptor owns the underlying Node server too, since binding to the
+port is part of "start accepting." The composition root (`app.ts`)
+decides whether that server is http or https and only has to call
+`acceptor.start()`.
 
 */
 
 import type { Socket as BaseSocket, Server as BaseServer } from "socket.io";
-import https from "node:https";
+import type http from "node:http";
 
 import type {
   IClientChannel, IClientChannelAcceptor, EventMap,
@@ -59,14 +60,14 @@ export class SocketIoChannel<C2S extends EventMap, S2C extends EventMap>
 export class SocketIoChannelAcceptor<C2S extends EventMap, S2C extends EventMap>
   implements IClientChannelAcceptor<C2S, S2C> {
   io: BaseServer<any, any>
-  httpsServer: https.Server
+  httpServer: http.Server
   port: number
 
   _channelHandler: ((channel: IClientChannel<C2S, S2C>) => void) | null = null
 
-  constructor(io: BaseServer<any, any>, httpsServer: https.Server, port: number) {
+  constructor(io: BaseServer<any, any>, httpServer: http.Server, port: number) {
     this.io = io;
-    this.httpsServer = httpsServer;
+    this.httpServer = httpServer;
     this.port = port;
   }
 
@@ -80,10 +81,10 @@ export class SocketIoChannelAcceptor<C2S extends EventMap, S2C extends EventMap>
         this._channelHandler(new SocketIoChannel<C2S, S2C>(socket));
       }
     });
-    this.httpsServer.listen(this.port);
+    this.httpServer.listen(this.port);
   }
 
   stop(): void {
-    this.httpsServer.close();
+    this.httpServer.close();
   }
 }

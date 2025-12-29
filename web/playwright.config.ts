@@ -10,7 +10,7 @@ export default defineConfig({
     {
       command: 'npm run start',
       cwd: '../backend/.prototype',
-      url: 'https://localhost:3000/socket.io/?EIO=4&transport=polling',
+      url: 'http://localhost:3000/socket.io/?EIO=4&transport=polling',
       reuseExistingServer: true,
       ignoreHTTPSErrors: true,
       timeout: 60_000,

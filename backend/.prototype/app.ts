@@ -12,6 +12,7 @@ import { Coordinator } from "./coordinator.ts";
 import { MediasoupMediaWorker } from "./media-mediasoup.ts";
 
 import { SSL_KEY_PATH, SSL_CERTS_PATH, SFU_WORKER_PORT_RANGE, SPACE_HTTP_PORT } from "./utils/constants.ts";
+import type { TlsOptions } from "./utils/tls.ts";
 
 import fs from "fs";
 
@@ -23,14 +24,22 @@ import fs from "fs";
 // config or generates it (see Phase 7 in PLANS.md).
 const SERVER_ID = 0;
 
+// HTTP in development, HTTPS in production. Both servers (signaling +
+// frontend-facing HTTP) use the same protocol so the frontend only needs
+// one matching ENVIRONMENT flag. Certs are read only when needed.
+const IS_PRODUCTION = process.env.ENVIRONMENT === "production";
+const tlsOptions: TlsOptions | null = IS_PRODUCTION
+  ? {
+    key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
+    cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),
+  }
+  : null;
+
 const bus = new InProcessBus();
 const coordinator = new Coordinator(bus);
 const signalingServer = SignalingServer.create(
   SERVER_ID,
-  {
-    key: fs.readFileSync(SSL_KEY_PATH, "utf-8"),
-    cert: fs.readFileSync(SSL_CERTS_PATH, "utf-8"),
-  },
+  tlsOptions,
   {
     cors: {
       origin: "http://localhost:5173",
@@ -41,7 +50,7 @@ const signalingServer = SignalingServer.create(
   3000,
   bus,
 );
-const httpServer = new FrontendFacingHttpServer(bus, SPACE_HTTP_PORT);
+const httpServer = new FrontendFacingHttpServer(bus, SPACE_HTTP_PORT, tlsOptions);
 const mediaWorker = await MediasoupMediaWorker.create(SFU_WORKER_PORT_RANGE);
 const sfuWorker = new SfuWorker(mediaWorker, bus);
 
