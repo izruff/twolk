@@ -12,23 +12,31 @@ interface SpaceMemberBoxProps {
   analyzer: AnalyserNode | null;
 }
 
-// Border thickness, in px, grows from BASE up to MAX as the member's audio
-// gets louder. BASE matches the resting border below.
+// Ring thickness, in px, grows from BASE up to MAX as the member's audio
+// gets louder. The ring is drawn outside the box so it never changes layout.
 const BASE_BORDER_WIDTH = 2;
 const MAX_BORDER_WIDTH = 9;
+const BOX_RADIUS = 20;
 
 export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberBoxProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const boxRef = useRef<HTMLDivElement>(null);
+  const borderRingRef = useRef<HTMLDivElement>(null);
   const animationIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const resetBorder = () => {
-      if (boxRef.current) boxRef.current.style.borderWidth = `${BASE_BORDER_WIDTH}px`;
+    const setRingWidth = (width: number) => {
+      if (!borderRingRef.current) return;
+      borderRingRef.current.style.borderWidth = `${width}px`;
+      borderRingRef.current.style.inset = `-${width}px`;
+      borderRingRef.current.style.borderRadius = `${BOX_RADIUS + width}px`;
+    };
+
+    const resetBorderRing = () => {
+      setRingWidth(BASE_BORDER_WIDTH);
     };
 
     if (!analyzer) {
-      resetBorder();
+      resetBorderRing();
       return;
     }
 
@@ -62,10 +70,8 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
       // Mean frequency magnitude (0..255); saturate at a fairly low value so
       // ordinary speech, not just shouting, lights up the border.
       const level = Math.min(1, (sum / bufferLength) / 48);
-      if (boxRef.current) {
-        const width = BASE_BORDER_WIDTH + level * (MAX_BORDER_WIDTH - BASE_BORDER_WIDTH);
-        boxRef.current.style.borderWidth = `${width}px`;
-      }
+      const width = BASE_BORDER_WIDTH + level * (MAX_BORDER_WIDTH - BASE_BORDER_WIDTH);
+      setRingWidth(width);
 
       animationIdRef.current = requestAnimationFrame(draw);
     };
@@ -76,17 +82,15 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
       if (animationIdRef.current !== null) {
         cancelAnimationFrame(animationIdRef.current);
       }
-      resetBorder();
+      resetBorderRing();
     };
   }, [analyzer, canvasRef, isSelf]);
 
   return (
     <Box
-      ref={boxRef}
       style={{
-        borderRadius: 20,
+        borderRadius: BOX_RADIUS,
         background: isSelf ? '#e0f7fa' : '#f5f5f5',
-        border: `${BASE_BORDER_WIDTH}px solid ${isSelf ? '#00bcd4' : '#ddd'}`,
         boxSizing: 'border-box',
         aspectRatio: '1.3/1',
         minHeight: 120,
@@ -98,10 +102,22 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
         alignItems: 'flex-end',
         padding: 24,
         position: 'relative',
-        boxShadow: isSelf ? '0 0 0 2px #00bcd4' : 'none',
-        overflow: 'hidden',
+        overflow: 'visible',
       }}
     >
+      <Box
+        ref={borderRingRef}
+        aria-hidden="true"
+        style={{
+          position: 'absolute',
+          inset: `-${BASE_BORDER_WIDTH}px`,
+          border: `${BASE_BORDER_WIDTH}px solid ${isSelf ? '#00bcd4' : '#ddd'}`,
+          borderRadius: BOX_RADIUS + BASE_BORDER_WIDTH,
+          boxSizing: 'border-box',
+          pointerEvents: 'none',
+          zIndex: 20,
+        }}
+      />
       <canvas
         ref={canvasRef}
         width={200}
@@ -112,7 +128,7 @@ export function SpaceMemberBox({ data, isSelf, isMuted, analyzer }: SpaceMemberB
           left: 0,
           width: '100%',
           height: '100%',
-          borderRadius: 20,
+          borderRadius: BOX_RADIUS,
         }}
       />
       {isMuted && (
