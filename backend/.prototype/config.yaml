@@ -1,0 +1,39 @@
+# Backend configuration.
+#
+# Scalar fields accept a direct value or an env-var reference:
+#   port: 3000
+#   port:
+#     env: MY_PORT
+#
+# Builder fields (tls, sfuWorker) accept only the object form shown here;
+# their sub-fields may still use the env-var syntax.
+
+# Origin of the web frontend, used for CORS allow-listing.
+webOrigin: "http://localhost:5173"
+
+# "development" or "production". Controls whether TLS is active.
+# Set to "production" or use the env-var form for deployed environments:
+#   environment:
+#     env: ENVIRONMENT
+environment: development
+
+signalingServer:
+  # Only one signaling server today; will be configured per-instance in
+  # the future (see PLANS.md).
+  id: 0
+  port: 3000
+
+httpServer:
+  port: 8000
+
+# TLS certificate paths (builder field — only accepted as an object).
+# Required when environment is "production"; ignored otherwise.
+# Paths are resolved relative to this config file.
+#
+# tls:
+#   keyPath: "../../certs/ssl/key.pem"
+#   certPath: "../../certs/ssl/cert.pem"
+
+sfuWorker:
+  portMin: 10000
+  portMax: 11000
