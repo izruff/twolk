@@ -15,10 +15,12 @@ server); subscribing no longer creates them.
 
 A space moves through three statuses: "initialized" (created, nobody has
 joined), "running" (at least one subscribe has promoted it and allocated
-its router), and "ended" (last subscriber left). The first subscribe
-allocates the primary router and promotes initialized -> running; the last
-unsubscribe demotes running -> ended. Subscribing to a missing or ended
-space is rejected.
+its router), and "ended" (last subscriber left). Subscribing to a missing
+or ended space is rejected.
+
+Each space carries a SpaceLifecyclePolicy that decides when status
+transitions occur. applyTransition owns all side effects of every
+transition so policies never need to touch infrastructure directly.
 
 */
 
@@ -28,13 +30,22 @@ import type {
   IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
 import type { RouterAllocator } from "./router-allocator.ts";
-import type { Space, SpaceData } from "./domain.ts";
+import type { Space, SpaceData, SpaceStatus } from "./domain.ts";
 import type { IStore } from "./store-port.ts";
+import type { SpaceLifecyclePolicy } from "./space-lifecycle-policy.ts";
+import { SubscriptionDrivenPolicy } from "./subscription-driven-policy.ts";
+
+
+export function defaultPolicyFactory(type: string): SpaceLifecyclePolicy {
+  if (type === "subscription-driven") return new SubscriptionDrivenPolicy();
+  throw new Error("unknown space lifecycle policy type: " + type);
+}
 
 
 export class SpaceService {
   bus: IMessageBus
   routerAllocator: RouterAllocator
+  policyFactory: (type: string) => SpaceLifecyclePolicy
 
   spaces: IStore<string, Space>
 
@@ -47,10 +58,12 @@ export class SpaceService {
     bus: IMessageBus,
     routerAllocator: RouterAllocator,
     spaceStore: IStore<string, Space>,
+    policyFactory: (type: string) => SpaceLifecyclePolicy = defaultPolicyFactory,
   ) {
     this.bus = bus;
     this.routerAllocator = routerAllocator;
     this.spaces = spaceStore;
+    this.policyFactory = policyFactory;
   }
 
   start() {
@@ -111,45 +124,68 @@ export class SpaceService {
     }
   }
 
-  // Creates a space with caller-supplied data and a freshly generated uuid.
-  // It starts "initialized"; the router is allocated lazily on the first
-  // subscribe.
-  create(data: SpaceData): string {
+  // Creates a space with the given data and lifecycle policy. The policy's
+  // onCreated hook is called immediately with a transition callback so
+  // timer-based policies can schedule transitions before any client joins.
+  create(data: SpaceData, policyType: string): string {
     const uuid = randomUUID();
+    const policy = this.policyFactory(policyType);
     const space: Space = {
       uuid, status: "initialized", primaryRouter: null,
       data: structuredClone(data),
       members: new Map(),
+      policy,
     };
     this.spaces.set(uuid, space);
+    policy.onCreated(uuid, (to) => this.applyTransition(space, to));
     return uuid;
   }
 
-  // Ends a space (running -> ended) once it is empty and no server is
-  // subscribed to it. Called both when the last member leaves
-  // (member-service) and when the last server unsubscribes. The space
-  // record is kept around so it can still be read as "ended".
-  // TODO: This logic is only for spaces ended upon last member leaving.
-  // We need to handle other kinds of spaces in the future.
-  endIfEmpty(uuid: string) {
-    const space = this.spaces.get(uuid);
-    if (space === undefined) {
+  // Central method for all status transitions. Owns every side effect:
+  // - initialized → running: allocates the primary router.
+  // - running → ended: deallocates the router and notifies the policy.
+  // Policies call the transition callback (supplied via onCreated) instead
+  // of touching these side effects directly.
+  async applyTransition(space: Space, to: SpaceStatus): Promise<void> {
+    if (space.status === to) return;
+
+    if (to === "running" && space.status === "initialized") {
+      await this.routerAllocator.allocate(space);
+    } else if (to === "ended" && space.status === "running") {
+      if (space.primaryRouter !== null) {
+        await this.routerAllocator.remove(space.primaryRouter.id);
+        space.primaryRouter = null;
+      }
+      space.policy.onEnded(space.uuid);
+    } else {
+      console.warn(
+        `applyTransition: ignoring invalid transition ${space.status} → ${to}`);
       return;
     }
-    if (space.members.size === 0 && !this.hasSubscribers(uuid)) {
-      if (space.status === "running") {
-        space.status = "ended";
-      } else {
-        // A space reaching zero subscribers should always be "running".
-        console.log("warning: ending space " + uuid +
-          " with unexpected status " + space.status);
-      }
+
+    space.status = to;
+  }
+
+  // Called by MemberService after a member is removed. Delegates the
+  // "should the space end?" decision to the space's lifecycle policy.
+  notifyMemberLeft(uuid: string) {
+    const space = this.spaces.get(uuid);
+    if (space === undefined) return;
+
+    const subscriberCount = this.spaceToSubscribedMap.get(uuid)?.size ?? 0;
+    const desiredStatus = space.policy.onMemberLeft(
+      uuid, space.status, subscriberCount, space.members.size);
+
+    if (desiredStatus !== undefined) {
+      this.applyTransition(space, desiredStatus).catch((e: Error) => {
+        console.error("notifyMemberLeft: transition failed: " + e.message);
+      });
     }
   }
 
   onCreateSpaceRequest: QueueConsumerCallback<"createSpaceRequest"> =
-    ({ data }, ack, _nack) => {
-      const uuid = this.create(data);
+    ({ data, policyType }, ack, _nack) => {
+      const uuid = this.create(data, policyType);
       ack({ uuid });
     };
 
@@ -171,57 +207,46 @@ export class SpaceService {
         return;
       }
       if (space.status !== "initialized" && space.status !== "running") {
-        // Ended (or any non-joinable status): cannot subscribe.
         nack(new Error("space is not joinable"));
         return;
       }
 
-      // Callback function to subscribe and ack after the space is ready
-      const subscribeAndAckFn = () => {
-        if (space.primaryRouter === null ||
-          space.primaryRouter.rtpCapabilities === null) {
-            // This should not happen because routerAllocator.allocate waits
-            // for router allocation to finish before calling this function.
+      const subscriberCount = this.spaceToSubscribedMap.get(uuid)?.size ?? 0;
+      const desiredStatus = space.policy.onSubscribe(
+        uuid, space.status, subscriberCount, space.members.size);
+
+      const transitionPromise = desiredStatus !== undefined
+        ? this.applyTransition(space, desiredStatus)
+        : Promise.resolve();
+
+      transitionPromise
+        .then(() => {
+          if (space.primaryRouter === null ||
+            space.primaryRouter.rtpCapabilities === null) {
             nack(new Error("space router not allocated yet"));
             return;
           }
-        this.subscribe(serverId, uuid);
+          this.subscribe(serverId, uuid);
 
-        // Deep-copy the objects instead of sharing reference (only because
-        // we are simulating everything in one process).
-        ack({
-          clientSideSpace: {
-            uuid: space.uuid,
-            data: structuredClone(space.data),
-            members: Array.from(space.members.entries()).map(
-              ([id, member]) => ({
-                id, data: structuredClone(member.data),
-                state: structuredClone(member.state)
-              })
-            ),
-          },
-          routerRtpCapabilities: space.primaryRouter.rtpCapabilities,
-        });
-      }
-
-      if (space.status === "initialized") {
-        // First subscribe: promote to running and allocate the router.
-        // For now, we assume each space uses exactly one router, and only
-        // one worker is present. In the future, we might want multiple
-        // routers per space for load balancing.
-        space.status = "running";
-        this.routerAllocator.allocate(space)
-          .then((_) => {
-            subscribeAndAckFn();
-          })
-          .catch((e: Error) => {
-            // TODO: Need retry mechanism
-            throw new Error("newRouterRequest nacked: " + e.message);
+          // Deep-copy the objects instead of sharing reference (only because
+          // we are simulating everything in one process).
+          ack({
+            clientSideSpace: {
+              uuid: space.uuid,
+              data: structuredClone(space.data),
+              members: Array.from(space.members.entries()).map(
+                ([id, member]) => ({
+                  id, data: structuredClone(member.data),
+                  state: structuredClone(member.state)
+                })
+              ),
+            },
+            routerRtpCapabilities: space.primaryRouter.rtpCapabilities,
           });
-      } else {
-        // Already running: the router is allocated.
-        subscribeAndAckFn();
-      }
+        })
+        .catch((e: Error) => {
+          nack(e);
+        });
     }
 
   onUnsubscribeFromSpaceRequest: QueueConsumerCallback<"unsubscribeFromSpaceRequest"> =
@@ -233,8 +258,14 @@ export class SpaceService {
       }
 
       this.unsubscribe(serverId, uuid);
-      this.endIfEmpty(uuid);
+      const subscriberCount = this.spaceToSubscribedMap.get(uuid)?.size ?? 0;
+      const desiredStatus = space.policy.onUnsubscribe(
+        uuid, space.status, subscriberCount, space.members.size);
 
-      ack();
+      const transitionPromise = desiredStatus !== undefined
+        ? this.applyTransition(space, desiredStatus)
+        : Promise.resolve();
+
+      transitionPromise.then(() => ack()).catch((e: Error) => nack(e));
     };
 }

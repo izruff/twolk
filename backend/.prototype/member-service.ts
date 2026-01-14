@@ -167,9 +167,8 @@ export class MemberService {
       // Clean up member
       this.remove(id);
 
-      // End the space if this was the last member and no server is
-      // subscribed to it.
-      this.spaceService.endIfEmpty(space.uuid);
+      // Let the space's lifecycle policy decide whether to end the space.
+      this.spaceService.notifyMemberLeft(space.uuid);
 
       ack();
 

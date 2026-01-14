@@ -14,6 +14,7 @@ Router.rtpCapabilities; Phase 4 hides those behind a media port.
 
 import type mediasoup from "mediasoup";
 import type mediasoupClient from "mediasoup-client";
+import type { SpaceLifecyclePolicy } from "./space-lifecycle-policy.ts";
 
 
 export interface SpaceData {
@@ -26,6 +27,7 @@ export type SpaceStatus = "initialized" | "running" | "ended";
 export interface Space {
   uuid: string;
   status: SpaceStatus;
+  policy: SpaceLifecyclePolicy;
   // TODO: This should be a map in the future
   primaryRouter: Router | null;
   data: SpaceData;

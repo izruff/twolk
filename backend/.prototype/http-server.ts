@@ -87,7 +87,10 @@ export class FrontendFacingHttpServer {
           return;
         }
 
-        this.bus.publish("createSpaceRequest", { data },
+        // TODO: policyType is subject to change once the frontend can
+        // specify a policy per space.
+        this.bus.publish("createSpaceRequest",
+          { data, policyType: "subscription-driven" },
           ({ uuid }) => { sendJson(res, 201, { uuid }); },
           (e) => { sendJson(res, 500, { error: e.message }); });
       })

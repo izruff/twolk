@@ -31,6 +31,7 @@ export type QueuePayloadTypeMap = {
   // CRUD on the Space object, forwarded from the HTTP server.
   createSpaceRequest: {
     data: SpaceData,
+    policyType: string,
   };
   readSpaceRequest: {
     uuid: string,

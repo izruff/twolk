@@ -91,7 +91,8 @@ function createSpace(
   data = { name: "Test", description: "integration" },
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    bus.publish("createSpaceRequest", { data },
+    bus.publish("createSpaceRequest",
+      { data, policyType: "subscription-driven" },
       ({ uuid }) => resolve(uuid), reject);
   });
 }
