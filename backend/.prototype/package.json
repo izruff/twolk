@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "nodemon": "^3.1.10",
+    "typedoc": "^0.28.19",
     "vitest": "^4.1.7"
   }
 }
