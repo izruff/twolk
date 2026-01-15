@@ -5,8 +5,8 @@ Composition root for the coordinator-side services.
 In the future, the coordinator service should also handle scaling the SFU
 workers horizontally, managing load distribution and RTP packet transfer
 between two workers, and implementing router migration policies from one
-worker to another. For now, this class is responsible only for assembling
-the sub-services and starting them in the right order.
+worker to another. For now, this class is responsible for assembling the
+sub-services and starting them in the right order.
 
 Sub-services:
 - RouterAllocator        — owns routers; publishes newRouterRequest.
@@ -18,10 +18,13 @@ Sub-services:
 - MemberService          — owns members; handles add/removeMemberRequest.
 - SpaceUpdateDispatcher  — translates S:* space updates into worker
                            transportUpdateStream events and back.
+- ChannelPreAllocator    — picks which signaling server a new client
+                           should connect to; updated whenever servers
+                           register or deregister via the bus.
 
 */
 
-import type { IMessageBus } from "./bus.ts";
+import type { IMessageBus, QueueConsumerCallback } from "./bus.ts";
 import { RouterAllocator } from "./router-allocator.ts";
 import { TransportAllocator } from "./transport-allocator.ts";
 import { SpaceService } from "./space-service.ts";
@@ -30,11 +33,14 @@ import { SpaceUpdateDispatcher } from "./space-update-dispatcher.ts";
 import { InMemoryStore } from "./in-memory-store.ts";
 import { ProcessCounterIdGenerator } from "./id-gen-process.ts";
 import type { Space, Member } from "./domain.ts";
+import {
+  ChannelPreAllocator,
+  RoundRobinServerStrategy,
+  type IServerAllocationStrategy,
+} from "./channel-pre-allocator.ts";
 
 
 export class Coordinator {
-  // TODO: Need to also track servers in the future
-
   bus: IMessageBus
 
   routerAllocator: RouterAllocator
@@ -42,8 +48,14 @@ export class Coordinator {
   spaceService: SpaceService
   memberService: MemberService
   spaceUpdateDispatcher: SpaceUpdateDispatcher
+  channelPreAllocator: ChannelPreAllocator
 
-  constructor(bus: IMessageBus) {
+  _cancelTryJoin: (() => void) | null = null
+
+  constructor(
+    bus: IMessageBus,
+    allocationStrategy: IServerAllocationStrategy = new RoundRobinServerStrategy(),
+  ) {
     this.bus = bus;
 
     // The "is this space subscribed?" check is supplied as a closure so
@@ -68,6 +80,14 @@ export class Coordinator {
       memberStore, memberIdGen);
     this.spaceUpdateDispatcher = new SpaceUpdateDispatcher(
       bus, this.spaceService, this.transportAllocator);
+
+    this.channelPreAllocator = new ChannelPreAllocator(allocationStrategy);
+    bus.onSignalingServerConnected((serverId, serverUrl) => {
+      this.channelPreAllocator.onServerConnected(serverId, serverUrl);
+    });
+    bus.onSignalingServerDisconnected((serverId) => {
+      this.channelPreAllocator.onServerDisconnected(serverId);
+    });
   }
 
   // Starts every sub-service. Must be called once after construction;
@@ -76,5 +96,23 @@ export class Coordinator {
     this.spaceService.start();
     this.memberService.start();
     this.spaceUpdateDispatcher.start();
+
+    this._cancelTryJoin = this.bus.consume(
+      "tryJoinSpaceRequest", this.onTryJoinSpaceRequest.bind(this));
   }
+
+  onTryJoinSpaceRequest: QueueConsumerCallback<"tryJoinSpaceRequest"> =
+    ({ spaceUuid }, ack, nack) => {
+      const space = this.spaceService.get(spaceUuid);
+      if (space === undefined || space.status === "ended") {
+        nack(new Error("space not found or not joinable"));
+        return;
+      }
+      try {
+        const serverUrl = this.channelPreAllocator.allocate();
+        ack({ serverUrl });
+      } catch (e: any) {
+        nack(e);
+      }
+    };
 }

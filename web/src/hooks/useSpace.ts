@@ -1,24 +1,26 @@
 import { useRef, useSyncExternalStore } from 'react';
 import { io } from 'socket.io-client';
 
-import { SIGNALING_SERVER_URL } from '../constants/url';
 import { Space, type SpaceSnapshot } from '../types/space';
 import { SignalingSocketWrapper } from '../types/signaling.socket';
 import type { MemberData, MemberStateFromClient } from '../types/member';
 
 
+// serverUrl is null until the try-join response arrives; the Space object
+// is not created until a non-null URL is provided.
 export function useSpace(
   spaceUuid: string,
+  serverUrl: string | null,
   producerData: MemberData,
   producerState: MemberStateFromClient,
-): [Space, SpaceSnapshot | null] {
+): [Space | null, SpaceSnapshot | null] {
   const spaceRef = useRef<Space | null>(null);
   const subscribeRef = useRef<((callback: () => void) => () => void) | null>(null);
   const getSnapshotRef = useRef<(() => SpaceSnapshot | null) | null>(null);
 
-  if (!spaceRef.current) {
+  if (!spaceRef.current && serverUrl !== null) {
     const socket = new SignalingSocketWrapper(
-      io(SIGNALING_SERVER_URL, { autoConnect: false }),
+      io(serverUrl, { autoConnect: false }),
       spaceUuid,
       producerData,
       producerState
@@ -31,8 +33,8 @@ export function useSpace(
   }
 
   const snapshot = useSyncExternalStore(
-    subscribeRef.current!,
-    getSnapshotRef.current!,
+    subscribeRef.current ?? (() => () => {}),
+    getSnapshotRef.current ?? (() => null),
   );
 
   return [spaceRef.current, snapshot];

@@ -216,11 +216,14 @@ export class SignalingServer {
   spaces: IStore<string, Space>
   members: IStore<number, Member>
 
-  // Cancellation handle for the bus subscription registered in start().
+  // Cancellation handles for the bus subscriptions registered in start().
   _cancelConsumer: (() => void) | null = null
+  // Deregisters this server from the bus on disconnect.
+  _deregisterServer: (() => void) | null = null
 
   constructor(
     serverId: number,
+    serverUrl: string,
     acceptor: Acceptor,
     bus: IMessageBus,
     spaceStore: IStore<string, Space>,
@@ -231,8 +234,11 @@ export class SignalingServer {
     this.bus = bus;
     this.spaces = spaceStore;
     this.members = memberStore;
-
     this.memberIdToChannel = new Map();
+
+    // Announce this server to the coordinator via the bus so the
+    // ChannelPreAllocator can include it in allocation decisions.
+    this._deregisterServer = bus.registerSignalingServer(serverId, serverUrl);
   }
 
   // Builds the underlying Node + socket.io servers and the Socket.IO
@@ -245,8 +251,10 @@ export class SignalingServer {
     const httpServer = createNodeHttpServer(tlsOptions);
     const io = new BaseServer(httpServer, ioOptions);
     const acceptor: Acceptor = new SocketIoChannelAcceptor(io, httpServer, port);
+    const protocol = tlsOptions ? "wss" : "ws";
+    const serverUrl = `${protocol}://localhost:${port}`;
     return new SignalingServer(
-      serverId, acceptor, bus,
+      serverId, serverUrl, acceptor, bus,
       new InMemoryStore<string, Space>(),
       new InMemoryStore<number, Member>(),
     );
@@ -485,12 +493,13 @@ export class SignalingServer {
       if (type === "C:transportParamsEvent") {
         const channel = this.memberIdToChannel.get(payload.memberId);
         if (channel === undefined) {
-          nack(new Error("channel not found"));
+          // Member not managed by this server — another server will handle it.
+          ack();
           return;
         }
 
-        // Pass the transport parameters to the client
-        // Send own memberId if producer, else send consumesFromMemberId
+        // Pass the transport parameters to the client.
+        // Send own memberId if producer, else send consumesFromMemberId.
         channel.emit("memberEvent", "transportParams", {
           memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
@@ -498,6 +507,11 @@ export class SignalingServer {
 
         ack();
       } else if (type === "C:producerConnectedEvent") {
+        if (!this.memberIdToChannel.has(payload.memberId)) {
+          // Member not managed by this server — another server will handle it.
+          ack();
+          return;
+        }
         try {
           this.updateMember(payload.memberId, { transportIsConnected: true });
         } catch (err: any) {

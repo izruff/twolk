@@ -62,6 +62,11 @@ export type QueuePayloadTypeMap = {
     serverId: number,
     uuid: string,
   };
+  // Sent by the HTTP server to ask the coordinator which signaling server
+  // a joining client should connect to.
+  tryJoinSpaceRequest: {
+    spaceUuid: string,
+  };
   spaceUpdateStream: { uuid: string } & {
     [K in SpaceUpdateTypes]: { type: K; payload: SpaceUpdatePayloadTypeMap[K] }
   }[SpaceUpdateTypes];
@@ -93,6 +98,9 @@ export type QueueResponseTypeMap = {
   };
   removeMemberRequest: void;
   unsubscribeFromSpaceRequest: void;
+  tryJoinSpaceRequest: {
+    serverUrl: string,
+  };
   // The optional fields are populated for produce/consume responses so the
   // signaling server can forward them to the client's ack.
   spaceUpdateStream: void | {
@@ -237,6 +245,10 @@ export type TransportUpdateTypes = keyof TransportUpdatePayloadTypeMap;
 // publisher receives multiple responses; today consumers use a prefix on the
 // payload `type` field ("S:" / "C:" / "W:") to decide whether a given event
 // is theirs and skip otherwise.
+//
+// `registerSignalingServer` is called by each SignalingServer when it is
+// constructed. The bus fires `onSignalingServerConnected` callbacks and
+// returns a deregister function for when the server disconnects.
 export interface IMessageBus {
   consume<K extends QueueTypes>(
     queueName: K, callback: QueueConsumerCallback<K>
@@ -247,6 +259,10 @@ export interface IMessageBus {
     onAck: (resp: QueueResponseTypeMap[K]) => void,
     onNack: (e: Error) => void,
   ): void;
+
+  registerSignalingServer(serverId: number, serverUrl: string): () => void;
+  onSignalingServerConnected(cb: (serverId: number, serverUrl: string) => void): () => void;
+  onSignalingServerDisconnected(cb: (serverId: number) => void): () => void;
 }
 
 
@@ -255,6 +271,9 @@ export interface IMessageBus {
 // same broker simulation that previously lived inside `Coordinator`.
 export class InProcessBus implements IMessageBus {
   queueConsumerCallbacks: QueueConsumerCallbackCollection;
+
+  private _serverConnectedCbs = new Set<(id: number, url: string) => void>();
+  private _serverDisconnectedCbs = new Set<(id: number) => void>();
 
   constructor() {
     // TODO: Automate this set instantiations
@@ -267,6 +286,7 @@ export class InProcessBus implements IMessageBus {
       addMemberRequest: new Set(),
       removeMemberRequest: new Set(),
       unsubscribeFromSpaceRequest: new Set(),
+      tryJoinSpaceRequest: new Set(),
       spaceUpdateStream: new Set(),
       transportUpdateStream: new Set(),
     };
@@ -292,5 +312,22 @@ export class InProcessBus implements IMessageBus {
     this.queueConsumerCallbacks[queueName].forEach((callback) => {
       callback(payload, onAck, onNack);
     });
+  }
+
+  registerSignalingServer(serverId: number, serverUrl: string): () => void {
+    this._serverConnectedCbs.forEach((cb) => cb(serverId, serverUrl));
+    return () => {
+      this._serverDisconnectedCbs.forEach((cb) => cb(serverId));
+    };
+  }
+
+  onSignalingServerConnected(cb: (id: number, url: string) => void): () => void {
+    this._serverConnectedCbs.add(cb);
+    return () => { this._serverConnectedCbs.delete(cb); };
+  }
+
+  onSignalingServerDisconnected(cb: (id: number) => void): () => void {
+    this._serverDisconnectedCbs.add(cb);
+    return () => { this._serverDisconnectedCbs.delete(cb); };
   }
 }

@@ -105,11 +105,14 @@ function buildSfuWorker(raw: unknown): AppConfig["sfuWorker"] {
   };
 }
 
-function buildSignalingServer(raw: unknown): AppConfig["signalingServer"] {
-  const r = asObject(raw, "signalingServer");
+function buildSignalingServerEntry(
+  raw: unknown, i: number,
+): AppConfig["signalingServers"][number] {
+  const field = `signalingServers[${i}]`;
+  const r = asObject(raw, field);
   return {
-    id: resolveNumber(r.id, "signalingServer.id"),
-    port: resolveNumber(r.port, "signalingServer.port"),
+    id: resolveNumber(r.id, `${field}.id`),
+    port: resolveNumber(r.port, `${field}.port`),
   };
 }
 
@@ -126,7 +129,8 @@ function buildHttpServer(raw: unknown): AppConfig["httpServer"] {
 export interface AppConfig {
   webOrigin: string;
   environment: string;
-  signalingServer: { id: number; port: number };
+  signalingServers: Array<{ id: number; port: number }>;
+  channelAllocationStrategy: string;
   httpServer: { port: number };
   // null when environment !== "production" or when the tls section is absent.
   tls: TlsOptions | null;
@@ -138,7 +142,16 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
 
   const webOrigin = resolveString(r.webOrigin, "webOrigin");
   const environment = resolveOptionalString(r.environment, "environment", "development");
-  const signalingServer = buildSignalingServer(r.signalingServer);
+  const channelAllocationStrategy = resolveOptionalString(
+    r.channelAllocationStrategy, "channelAllocationStrategy", "round-robin");
+
+  // signalingServers is a builder-only array field.
+  if (!Array.isArray(r.signalingServers) || r.signalingServers.length === 0) {
+    throw new Error("config: signalingServers: expected a non-empty array");
+  }
+  const signalingServers = r.signalingServers.map(
+    (entry, i) => buildSignalingServerEntry(entry, i));
+
   const httpServer = buildHttpServer(r.httpServer);
 
   // tls is a builder-only field; it is optional and only applied in production.
@@ -155,7 +168,10 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
 
   const sfuWorker = buildSfuWorker(r.sfuWorker);
 
-  return { webOrigin, environment, signalingServer, httpServer, tls, sfuWorker };
+  return {
+    webOrigin, environment, signalingServers,
+    channelAllocationStrategy, httpServer, tls, sfuWorker,
+  };
 }
 
 export function loadConfig(configPath: string): AppConfig {

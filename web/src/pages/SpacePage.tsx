@@ -31,9 +31,12 @@ function SpacePage() {
   const spaceUuid = useParams().id!;
 
   const [accessState, setAccessState] = useState<AccessState>('loading');
+  // Populated by GET /space/try-join once the space is confirmed joinable.
+  const [serverUrl, setServerUrl] = useState<string | null>(null);
 
   const [space, snapshot] = useSpace(
     spaceUuid,
+    serverUrl,
     { name: 'You' },
     { isMuted: false },
   );
@@ -60,25 +63,34 @@ function SpacePage() {
     return analyzer;
   }
 
-  // Check the space exists and hasn't ended before connecting.
+  // Concurrently fetch space metadata and the signaling server URL. Both
+  // must succeed before the space is considered joinable.
   useEffect(() => {
     let cancelled = false;
-    fetch(`${REST_API_BASE_URL}/space?uuid=${encodeURIComponent(spaceUuid)}`)
-      .then(async (res) => {
+    Promise.all([
+      fetch(`${REST_API_BASE_URL}/space?uuid=${encodeURIComponent(spaceUuid)}`),
+      fetch(`${REST_API_BASE_URL}/space/try-join?uuid=${encodeURIComponent(spaceUuid)}`),
+    ])
+      .then(async ([spaceRes, tryJoinRes]) => {
         if (cancelled) return;
-        if (res.status === 404) { setAccessState('missing'); return; }
-        if (!res.ok) { setAccessState('error'); return; }
-        const body = await res.json();
+        if (spaceRes.status === 404) { setAccessState('missing'); return; }
+        if (!spaceRes.ok) { setAccessState('error'); return; }
+        const spaceBody = await spaceRes.json();
         if (cancelled) return;
-        setAccessState(body.status === 'ended' ? 'ended' : 'available');
+        if (spaceBody.status === 'ended') { setAccessState('ended'); return; }
+        if (!tryJoinRes.ok) { setAccessState('error'); return; }
+        const tryJoinBody = await tryJoinRes.json();
+        if (cancelled) return;
+        setServerUrl(tryJoinBody.serverUrl);
+        setAccessState('available');
       })
       .catch(() => { if (!cancelled) setAccessState('error'); });
     return () => { cancelled = true; };
   }, [spaceUuid]);
 
-  // Preparing the space (only once we know it is joinable)
+  // Preparing the space (only once we know it is joinable and have a server URL)
   useEffect(() => {
-    if (accessState !== 'available') return;
+    if (accessState !== 'available' || space === null) return;
 
     space.init(
       () => { console.log("connected") },
@@ -193,7 +205,7 @@ function SpacePage() {
 
   // Requesting for user media (only once the space is joinable)
   useEffect(() => {
-    if (accessState !== 'available') return;
+    if (accessState !== 'available' || space === null) return;
     navigator.mediaDevices.getUserMedia({ audio: true, video: false })
       .then((stream) => {
         const audioTrack = stream.getAudioTracks()[0];

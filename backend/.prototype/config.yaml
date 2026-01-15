@@ -5,8 +5,9 @@
 #   port:
 #     env: MY_PORT
 #
-# Builder fields (tls, sfuWorker) accept only the object form shown here;
-# their sub-fields may still use the env-var syntax.
+# Builder fields (tls, sfuWorker, each signalingServers entry) accept only
+# the object form shown here; their sub-fields may still use the env-var
+# syntax.
 
 # Origin of the web frontend, used for CORS allow-listing.
 webOrigin: "http://localhost:5173"
@@ -17,11 +18,15 @@ webOrigin: "http://localhost:5173"
 #     env: ENVIRONMENT
 environment: development
 
-signalingServer:
-  # Only one signaling server today; will be configured per-instance in
-  # the future (see PLANS.md).
-  id: 0
-  port: 3000
+# Strategy for choosing which signaling server a new client should connect to.
+# Supported values: "round-robin"
+channelAllocationStrategy: round-robin
+
+signalingServers:
+  - id: 0
+    port: 3000
+  - id: 1
+    port: 3001
 
 httpServer:
   port: 8000

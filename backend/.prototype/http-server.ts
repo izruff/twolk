@@ -71,6 +71,8 @@ export class FrontendFacingHttpServer {
       this.handleCreateSpace(req, res);
     } else if (req.method === "GET" && url.pathname === "/space") {
       this.handleReadSpace(url, res);
+    } else if (req.method === "GET" && url.pathname === "/space/try-join") {
+      this.handleTryJoinSpace(url, res);
     } else {
       sendJson(res, 404, { error: "not found" });
     }
@@ -107,6 +109,21 @@ export class FrontendFacingHttpServer {
     this.bus.publish("readSpaceRequest", { uuid },
       ({ data, status }) => { sendJson(res, 200, { ...data, status }); },
       () => { sendJson(res, 404, { error: "space not found" }); });
+  }
+
+  // Returns the URL of the signaling server the client should connect to for
+  // the given space. 404 if the space does not exist, is ended, or no servers
+  // are available.
+  handleTryJoinSpace(url: URL, res: http.ServerResponse) {
+    const spaceUuid = url.searchParams.get("uuid");
+    if (spaceUuid === null) {
+      sendJson(res, 400, { error: "missing uuid query parameter" });
+      return;
+    }
+
+    this.bus.publish("tryJoinSpaceRequest", { spaceUuid },
+      ({ serverUrl }) => { sendJson(res, 200, { serverUrl }); },
+      (e) => { sendJson(res, 404, { error: e.message }); });
   }
 }
 
