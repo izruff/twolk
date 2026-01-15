@@ -23,7 +23,7 @@ import { Coordinator } from "../coordinator.ts";
 import { SfuWorker } from "../worker.ts";
 import { SignalingServer } from "../server.ts";
 import { InMemoryStore } from "../in-memory-store.ts";
-import { RoundRobinServerStrategy } from "../channel-pre-allocator.ts";
+import { RoundRobinStrategy } from "../channel-pre-allocator.ts";
 import { loadConfig } from "../config.ts";
 import type {
   ClientToServerEvents, ServerToClientEvents, Space as SigSpace,
@@ -45,10 +45,12 @@ type Channel = FakeClientChannel<ClientToServerEvents, ServerToClientEvents>;
 const CONFIGS_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)), "configs");
 
-// Paths to the two test configs used to parameterize each suite.
+// Paths to the four test configs used to parameterize each suite.
 const TEST_CONFIGS: Array<[string, string]> = [
-  ["one server", path.join(CONFIGS_DIR, "one-server.yaml")],
-  ["two servers", path.join(CONFIGS_DIR, "two-servers.yaml")],
+  ["1 server / 1 worker",  path.join(CONFIGS_DIR, "one-server-one-worker.yaml")],
+  ["1 server / 2 workers", path.join(CONFIGS_DIR, "one-server-two-workers.yaml")],
+  ["2 servers / 1 worker", path.join(CONFIGS_DIR, "two-servers-one-worker.yaml")],
+  ["2 servers / 2 workers", path.join(CONFIGS_DIR, "two-servers-two-workers.yaml")],
 ];
 
 
@@ -57,20 +59,32 @@ const TEST_CONFIGS: Array<[string, string]> = [
 function buildSystem(configPath: string): {
   bus: InProcessBus;
   coordinator: Coordinator;
+  // Primary worker and media worker (index 0) — used by most tests.
   worker: SfuWorker;
+  mediaWorker: FakeMediaWorker;
+  // All workers for tests that care about count.
+  workers: SfuWorker[];
+  mediaWorkers: FakeMediaWorker[];
   // Primary server and acceptor (index 0) — used by all tests.
   server: SignalingServer;
   acceptor: Acceptor;
   // All servers and acceptors for tests that care about count.
   servers: SignalingServer[];
   acceptors: Acceptor[];
-  mediaWorker: FakeMediaWorker;
 } {
   const config = loadConfig(configPath);
   const bus = new InProcessBus();
-  const coordinator = new Coordinator(bus, new RoundRobinServerStrategy());
-  const mediaWorker = new FakeMediaWorker();
-  const worker = new SfuWorker(mediaWorker, bus);
+  const coordinator = new Coordinator(bus,
+    new RoundRobinStrategy(), new RoundRobinStrategy());
+
+  const workers: SfuWorker[] = [];
+  const mediaWorkers: FakeMediaWorker[] = [];
+  for (const wCfg of config.sfuWorkers) {
+    const mediaWorker = new FakeMediaWorker();
+    const worker = new SfuWorker(wCfg.id, mediaWorker, bus);
+    workers.push(worker);
+    mediaWorkers.push(mediaWorker);
+  }
 
   const servers: SignalingServer[] = [];
   const acceptors: Acceptor[] = [];
@@ -91,11 +105,13 @@ function buildSystem(configPath: string): {
   }
 
   coordinator.start();
-  worker.start((err) => { throw err; });
+  workers.forEach((w) => w.start((err) => { throw err; }));
   servers.forEach((s) => s.start());
 
   return {
-    bus, coordinator, worker, mediaWorker,
+    bus, coordinator,
+    worker: workers[0], mediaWorker: mediaWorkers[0],
+    workers, mediaWorkers,
     server: servers[0], acceptor: acceptors[0],
     servers, acceptors,
   };

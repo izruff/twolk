@@ -36,9 +36,12 @@ export type QueuePayloadTypeMap = {
   readSpaceRequest: {
     uuid: string,
   };
-  // Requests from coordinator to create a new router for a space
+  // Requests from coordinator to create a new router for a space.
+  // workerId identifies which SfuWorker should handle this request;
+  // other workers skip it silently.
   newRouterRequest: {
     assignedId: number,
+    workerId: number,
   };
   newWebRtcTransportRequest: {
     routerId: number,
@@ -263,6 +266,11 @@ export interface IMessageBus {
   registerSignalingServer(serverId: number, serverUrl: string): () => void;
   onSignalingServerConnected(cb: (serverId: number, serverUrl: string) => void): () => void;
   onSignalingServerDisconnected(cb: (serverId: number) => void): () => void;
+
+  // Called by each SfuWorker when constructed. Returns a deregister function.
+  registerMediaWorker(workerId: number): () => void;
+  onMediaWorkerConnected(cb: (workerId: number) => void): () => void;
+  onMediaWorkerDisconnected(cb: (workerId: number) => void): () => void;
 }
 
 
@@ -274,6 +282,8 @@ export class InProcessBus implements IMessageBus {
 
   private _serverConnectedCbs = new Set<(id: number, url: string) => void>();
   private _serverDisconnectedCbs = new Set<(id: number) => void>();
+  private _workerConnectedCbs = new Set<(id: number) => void>();
+  private _workerDisconnectedCbs = new Set<(id: number) => void>();
 
   constructor() {
     // TODO: Automate this set instantiations
@@ -329,5 +339,22 @@ export class InProcessBus implements IMessageBus {
   onSignalingServerDisconnected(cb: (id: number) => void): () => void {
     this._serverDisconnectedCbs.add(cb);
     return () => { this._serverDisconnectedCbs.delete(cb); };
+  }
+
+  registerMediaWorker(workerId: number): () => void {
+    this._workerConnectedCbs.forEach((cb) => cb(workerId));
+    return () => {
+      this._workerDisconnectedCbs.forEach((cb) => cb(workerId));
+    };
+  }
+
+  onMediaWorkerConnected(cb: (id: number) => void): () => void {
+    this._workerConnectedCbs.add(cb);
+    return () => { this._workerConnectedCbs.delete(cb); };
+  }
+
+  onMediaWorkerDisconnected(cb: (id: number) => void): () => void {
+    this._workerDisconnectedCbs.add(cb);
+    return () => { this._workerDisconnectedCbs.delete(cb); };
   }
 }

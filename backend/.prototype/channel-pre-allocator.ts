@@ -1,31 +1,32 @@
 /*
 
-Server selection for new client channels.
+Allocation strategy abstraction and server selection for new client channels.
 
-ChannelPreAllocator keeps track of connected signaling servers and uses
-an IServerAllocationStrategy to pick one when a new channel is requested.
-The strategy is injected so it can be swapped for testing or future
-load-aware variants.
+IAllocationStrategy is a generic "pick one from a list of IDs" contract
+used by both ChannelPreAllocator (signaling servers) and RouterAllocator
+(media workers).
 
 */
 
 
-export interface IServerAllocationStrategy {
-  pick(serverIds: number[]): number;
+// Generic allocation strategy: given a list of numeric IDs, return the
+// one selected for the next allocation.
+export interface IAllocationStrategy {
+  pick(ids: number[]): number;
 }
 
-// Stateful round-robin: cycles through server IDs in the order they
-// were passed, wrapping around when the end is reached.
-export class RoundRobinServerStrategy implements IServerAllocationStrategy {
+// Stateful round-robin: cycles through IDs in the order they were passed,
+// wrapping around when the end is reached.
+export class RoundRobinStrategy implements IAllocationStrategy {
   private _counter = 0;
 
-  pick(serverIds: number[]): number {
-    if (serverIds.length === 0) {
-      throw new Error("no signaling servers available");
+  pick(ids: number[]): number {
+    if (ids.length === 0) {
+      throw new Error("no items available for allocation");
     }
-    const idx = this._counter % serverIds.length;
+    const idx = this._counter % ids.length;
     this._counter++;
-    return serverIds[idx];
+    return ids[idx];
   }
 }
 
@@ -37,9 +38,9 @@ interface ServerEntry {
 
 export class ChannelPreAllocator {
   private _servers: ServerEntry[] = [];
-  private _strategy: IServerAllocationStrategy;
+  private _strategy: IAllocationStrategy;
 
-  constructor(strategy: IServerAllocationStrategy) {
+  constructor(strategy: IAllocationStrategy) {
     this._strategy = strategy;
   }
 

@@ -1,6 +1,7 @@
 webOrigin: "http://localhost:5173"
 environment: development
 channelAllocationStrategy: round-robin
+workerAllocationStrategy: round-robin
 
 signalingServers:
   - id: 0
@@ -9,6 +10,7 @@ signalingServers:
 httpServer:
   port: 8000
 
-sfuWorker:
-  portMin: 10000
-  portMax: 11000
+sfuWorkers:
+  - id: 0
+    portMin: 10000
+    portMax: 10499

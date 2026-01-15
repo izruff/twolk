@@ -35,8 +35,8 @@ import { ProcessCounterIdGenerator } from "./id-gen-process.ts";
 import type { Space, Member } from "./domain.ts";
 import {
   ChannelPreAllocator,
-  RoundRobinServerStrategy,
-  type IServerAllocationStrategy,
+  RoundRobinStrategy,
+  type IAllocationStrategy,
 } from "./channel-pre-allocator.ts";
 
 
@@ -54,7 +54,8 @@ export class Coordinator {
 
   constructor(
     bus: IMessageBus,
-    allocationStrategy: IServerAllocationStrategy = new RoundRobinServerStrategy(),
+    serverAllocationStrategy: IAllocationStrategy = new RoundRobinStrategy(),
+    workerAllocationStrategy: IAllocationStrategy = new RoundRobinStrategy(),
   ) {
     this.bus = bus;
 
@@ -73,7 +74,7 @@ export class Coordinator {
       transportIdGen,
     );
     this.routerAllocator = new RouterAllocator(
-      bus, this.transportAllocator, routerIdGen);
+      bus, this.transportAllocator, routerIdGen, workerAllocationStrategy);
     this.spaceService = new SpaceService(bus, this.routerAllocator, spaceStore);
     this.memberService = new MemberService(
       bus, this.spaceService, this.routerAllocator, this.transportAllocator,
@@ -81,7 +82,7 @@ export class Coordinator {
     this.spaceUpdateDispatcher = new SpaceUpdateDispatcher(
       bus, this.spaceService, this.transportAllocator);
 
-    this.channelPreAllocator = new ChannelPreAllocator(allocationStrategy);
+    this.channelPreAllocator = new ChannelPreAllocator(serverAllocationStrategy);
     bus.onSignalingServerConnected((serverId, serverUrl) => {
       this.channelPreAllocator.onServerConnected(serverId, serverUrl);
     });

@@ -45,6 +45,7 @@ interface PendingConsume {
 
 
 export class SfuWorker {
+  workerId: number
   mediaWorker: IMediaWorker
   bus: IMessageBus
 
@@ -57,14 +58,21 @@ export class SfuWorker {
 
   // Cancellation handles for the bus subscriptions registered in start().
   _cancelConsumers: (() => void)[] = []
+  // Deregisters this worker from the bus on disconnect.
+  _deregisterWorker: (() => void) | null = null
 
-  constructor(mediaWorker: IMediaWorker, bus: IMessageBus) {
+  constructor(workerId: number, mediaWorker: IMediaWorker, bus: IMessageBus) {
+    this.workerId = workerId;
     this.mediaWorker = mediaWorker;
     this.bus = bus;
 
     this.routers = new Map();
     this.transports = new Map();
     this.pendingConsumes = new Map();
+
+    // Announce this worker to the coordinator so the RouterAllocator can
+    // include it in allocation decisions.
+    this._deregisterWorker = bus.registerMediaWorker(workerId);
   }
 
   // Wires the death handler and registers bus consumers. Must be called
@@ -125,7 +133,9 @@ export class SfuWorker {
   }
 
   onNewRouterRequest: QueueConsumerCallback<"newRouterRequest"> =
-    async ({ assignedId }, ack, nack) => {
+    async ({ assignedId, workerId }, ack, nack) => {
+      // Each worker only handles requests explicitly assigned to it.
+      if (workerId !== this.workerId) return;
       try {
         const router = await this.createRouter(assignedId);
         ack({ rtpCapabilities: router.mediaRouter.rtpCapabilities });
@@ -138,7 +148,7 @@ export class SfuWorker {
     async ({ routerId, assignedId, isProducer }, ack, nack) => {
       const router = this.routers.get(routerId);
       if (router === undefined) {
-        nack(new Error("router not found"));
+        // Router belongs to a different worker — skip silently.
         return;
       }
 
@@ -170,7 +180,7 @@ export class SfuWorker {
 
       const transport = this.transports.get(id);
       if (transport === undefined) {
-        nack(new Error("transport not found"));
+        // Transport belongs to a different worker — skip silently.
         return;
       }
 

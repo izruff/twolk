@@ -95,12 +95,16 @@ function buildTls(
   };
 }
 
-function buildSfuWorker(raw: unknown): AppConfig["sfuWorker"] {
-  const r = asObject(raw, "sfuWorker");
+function buildSfuWorkerEntry(
+  raw: unknown, i: number,
+): AppConfig["sfuWorkers"][number] {
+  const field = `sfuWorkers[${i}]`;
+  const r = asObject(raw, field);
   return {
+    id: resolveNumber(r.id, `${field}.id`),
     portRange: {
-      min: resolveNumber(r.portMin, "sfuWorker.portMin"),
-      max: resolveNumber(r.portMax, "sfuWorker.portMax"),
+      min: resolveNumber(r.portMin, `${field}.portMin`),
+      max: resolveNumber(r.portMax, `${field}.portMax`),
     },
   };
 }
@@ -131,10 +135,11 @@ export interface AppConfig {
   environment: string;
   signalingServers: Array<{ id: number; port: number }>;
   channelAllocationStrategy: string;
+  workerAllocationStrategy: string;
   httpServer: { port: number };
   // null when environment !== "production" or when the tls section is absent.
   tls: TlsOptions | null;
-  sfuWorker: { portRange: { min: number; max: number } };
+  sfuWorkers: Array<{ id: number; portRange: { min: number; max: number } }>;
 }
 
 export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig {
@@ -144,6 +149,8 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
   const environment = resolveOptionalString(r.environment, "environment", "development");
   const channelAllocationStrategy = resolveOptionalString(
     r.channelAllocationStrategy, "channelAllocationStrategy", "round-robin");
+  const workerAllocationStrategy = resolveOptionalString(
+    r.workerAllocationStrategy, "workerAllocationStrategy", "round-robin");
 
   // signalingServers is a builder-only array field.
   if (!Array.isArray(r.signalingServers) || r.signalingServers.length === 0) {
@@ -166,11 +173,16 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
     console.warn("config: environment is production but no tls section provided — serving over HTTP");
   }
 
-  const sfuWorker = buildSfuWorker(r.sfuWorker);
+  if (!Array.isArray(r.sfuWorkers) || r.sfuWorkers.length === 0) {
+    throw new Error("config: sfuWorkers: expected a non-empty array");
+  }
+  const sfuWorkers = r.sfuWorkers.map(
+    (entry, i) => buildSfuWorkerEntry(entry, i));
 
   return {
     webOrigin, environment, signalingServers,
-    channelAllocationStrategy, httpServer, tls, sfuWorker,
+    channelAllocationStrategy, workerAllocationStrategy,
+    httpServer, tls, sfuWorkers,
   };
 }
 

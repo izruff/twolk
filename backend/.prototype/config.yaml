@@ -39,6 +39,12 @@ httpServer:
 #   keyPath: "../../certs/ssl/key.pem"
 #   certPath: "../../certs/ssl/cert.pem"
 
-sfuWorker:
-  portMin: 10000
-  portMax: 11000
+workerAllocationStrategy: round-robin
+
+sfuWorkers:
+  - id: 0
+    portMin: 10000
+    portMax: 11000
+  - id: 1
+    portMin: 11001
+    portMax: 12000

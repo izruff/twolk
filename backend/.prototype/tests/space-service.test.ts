@@ -26,6 +26,7 @@ import { InMemoryStore } from "../in-memory-store.ts";
 import { ProcessCounterIdGenerator } from "../id-gen-process.ts";
 import { FakeMediaWorker } from "../test-fakes/fake-media-worker.ts";
 import { FakePolicy } from "../test-fakes/fake-policy.ts";
+import { RoundRobinStrategy } from "../channel-pre-allocator.ts";
 import type { Space } from "../domain.ts";
 import type { SpaceLifecyclePolicy } from "../space-lifecycle-policy.ts";
 
@@ -34,12 +35,11 @@ function buildSystem(
   policyFactory?: (type: string) => SpaceLifecyclePolicy,
 ) {
   const bus = new InProcessBus();
-  const mediaWorker = new FakeMediaWorker();
-  const sfuWorker = new SfuWorker(mediaWorker, bus);
-  sfuWorker.start((err) => { throw err; });
 
   const spaceStore = new InMemoryStore<string, Space>();
   // Build allocators with the same lazy-closure pattern the Coordinator uses.
+  // RouterAllocator must be created before SfuWorker so it subscribes to
+  // onMediaWorkerConnected before the worker registers.
   let spaceService: SpaceService;
   const transportAllocator = new TransportAllocator(
     bus,
@@ -47,9 +47,15 @@ function buildSystem(
     new ProcessCounterIdGenerator(),
   );
   const routerAllocator = new RouterAllocator(
-    bus, transportAllocator, new ProcessCounterIdGenerator());
+    bus, transportAllocator, new ProcessCounterIdGenerator(),
+    new RoundRobinStrategy());
   spaceService = new SpaceService(bus, routerAllocator, spaceStore, policyFactory);
   spaceService.start();
+
+  // Worker is created after allocators so its registration event is received.
+  const mediaWorker = new FakeMediaWorker();
+  const sfuWorker = new SfuWorker(/* workerId */ 0, mediaWorker, bus);
+  sfuWorker.start((err) => { throw err; });
 
   return { bus, spaceService, spaceStore, routerAllocator, mediaWorker };
 }

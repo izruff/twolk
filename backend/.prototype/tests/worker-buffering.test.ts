@@ -21,7 +21,7 @@ import { waitFor } from "./test-utils.ts";
 function buildWorker(): { bus: InProcessBus; worker: SfuWorker; media: FakeMediaWorker } {
   const bus = new InProcessBus();
   const media = new FakeMediaWorker();
-  const worker = new SfuWorker(media, bus);
+  const worker = new SfuWorker(/* workerId */ 0, media, bus);
   worker.start((err) => { throw err; });
   return { bus, worker, media };
 }
@@ -46,8 +46,8 @@ describe("SfuWorker", () => {
   it("buffers a consume request and flushes it once the producer exists", async () => {
     const { bus, media } = buildWorker();
 
-    // Allocate router 0.
-    await publish(bus, "newRouterRequest", { assignedId: 0 });
+    // Allocate router 0 on worker 0.
+    await publish(bus, "newRouterRequest", { assignedId: 0, workerId: 0 });
 
     // Allocate two transports on it: 100 (producer) and 200 (consumer).
     await publish(bus, "newWebRtcTransportRequest",
@@ -95,7 +95,7 @@ describe("SfuWorker", () => {
   it("consumes immediately when the producer already exists", async () => {
     const { bus } = buildWorker();
 
-    await publish(bus, "newRouterRequest", { assignedId: 0 });
+    await publish(bus, "newRouterRequest", { assignedId: 0, workerId: 0 });
     await publish(bus, "newWebRtcTransportRequest",
       { routerId: 0, assignedId: 100, isProducer: true });
     await publish(bus, "newWebRtcTransportRequest",
