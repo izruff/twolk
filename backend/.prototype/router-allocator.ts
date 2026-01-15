@@ -20,7 +20,7 @@ import type { IMessageBus } from "./bus.ts";
 import type { Router, Space } from "./domain.ts";
 import type { TransportAllocator } from "./transport-allocator.ts";
 import type { IIdGenerator } from "./id-gen-port.ts";
-import type { IAllocationStrategy } from "./channel-pre-allocator.ts";
+import type { IAllocationStrategy } from "./allocation-strategy.ts";
 
 
 export class RouterAllocator {

@@ -23,7 +23,7 @@ import { Coordinator } from "../coordinator.ts";
 import { SfuWorker } from "../worker.ts";
 import { SignalingServer } from "../server.ts";
 import { InMemoryStore } from "../in-memory-store.ts";
-import { RoundRobinStrategy } from "../channel-pre-allocator.ts";
+import { RoundRobinStrategy } from "../allocation-strategy.ts";
 import { loadConfig } from "../config.ts";
 import type {
   ClientToServerEvents, ServerToClientEvents, Space as SigSpace,

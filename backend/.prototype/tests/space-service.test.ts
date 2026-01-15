@@ -26,7 +26,7 @@ import { InMemoryStore } from "../in-memory-store.ts";
 import { ProcessCounterIdGenerator } from "../id-gen-process.ts";
 import { FakeMediaWorker } from "../test-fakes/fake-media-worker.ts";
 import { FakePolicy } from "../test-fakes/fake-policy.ts";
-import { RoundRobinStrategy } from "../channel-pre-allocator.ts";
+import { RoundRobinStrategy } from "../allocation-strategy.ts";
 import type { Space } from "../domain.ts";
 import type { SpaceLifecyclePolicy } from "../space-lifecycle-policy.ts";
 

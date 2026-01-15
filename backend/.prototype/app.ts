@@ -14,7 +14,7 @@ import { FrontendFacingHttpServer } from "./http-server.ts";
 import { SfuWorker } from "./worker.ts";
 import { Coordinator } from "./coordinator.ts";
 import { MediasoupMediaWorker } from "./media-mediasoup.ts";
-import { RoundRobinStrategy } from "./channel-pre-allocator.ts";
+import { RoundRobinStrategy } from "./allocation-strategy.ts";
 
 
 // Resolve config.yaml relative to this file so the path is correct

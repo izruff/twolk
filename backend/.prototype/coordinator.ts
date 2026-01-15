@@ -33,11 +33,8 @@ import { SpaceUpdateDispatcher } from "./space-update-dispatcher.ts";
 import { InMemoryStore } from "./in-memory-store.ts";
 import { ProcessCounterIdGenerator } from "./id-gen-process.ts";
 import type { Space, Member } from "./domain.ts";
-import {
-  ChannelPreAllocator,
-  RoundRobinStrategy,
-  type IAllocationStrategy,
-} from "./channel-pre-allocator.ts";
+import { RoundRobinStrategy, type IAllocationStrategy } from "./allocation-strategy.ts";
+import { ChannelPreAllocator } from "./channel-pre-allocator.ts";
 
 
 export class Coordinator {
