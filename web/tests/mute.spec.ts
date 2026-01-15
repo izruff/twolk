@@ -1,26 +1,18 @@
-import { test, expect, type Page, type BrowserContext } from '@playwright/test';
-import { createSpaceViaHomePage } from './helpers';
+/* eslint-disable no-console */
+import { test, expect, type Page } from '@playwright/test';
+import {
+  makeUser,
+  createSpaceViaHomePage,
+  joinUser,
+  clickSomewhere,
+  waitForMemberCount,
+} from './helpers';
 
-async function clickSomewhere(page: Page) {
-  await page.locator('body').click();
-}
 
-async function waitForMemberCount(page: Page, expected: number, timeoutMs = 20_000) {
-  await page.waitForFunction(
-    (n) => {
-      // @ts-expect-error window.__twolkDebug attached by SpacePage
-      const snap = window.__twolkDebug?.space?.getSnapshot?.();
-      return snap && snap.members.length === n;
-    },
-    expected,
-    { timeout: timeoutMs },
-  );
-}
-
-// isMuted of the *other* member (the one that isn't us) in this page's snapshot.
+// Returns the isMuted state of the non-self member in the page's snapshot.
 async function otherMemberMuted(page: Page): Promise<boolean | null> {
   return await page.evaluate(() => {
-    // @ts-expect-error
+    // @ts-expect-error window.__twolkDebug attached by SpacePage
     const snap = window.__twolkDebug?.space?.getSnapshot?.();
     if (!snap) return null;
     const other = snap.members.find((m: any) => m.id !== snap.producer.id);
@@ -28,61 +20,48 @@ async function otherMemberMuted(page: Page): Promise<boolean | null> {
   });
 }
 
+
 test('mute disables the audio track and propagates isMuted to other members', async ({
   browser,
 }) => {
-  const ctxA: BrowserContext = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    permissions: ['microphone'],
-  });
-  const ctxB: BrowserContext = await browser.newContext({
-    ignoreHTTPSErrors: true,
-    permissions: ['microphone'],
-  });
-  const pageA = await ctxA.newPage();
-  const pageB = await ctxB.newPage();
+  const A = await makeUser(browser, 'A');
+  const B = await makeUser(browser, 'B');
 
-  // A creates the space via the home page and lands on it; B joins via URL.
-  const SPACE_URL = await createSpaceViaHomePage(pageA);
-  await clickSomewhere(pageA);
-  await pageB.goto(SPACE_URL);
-  await clickSomewhere(pageB);
+  const SPACE_URL = await createSpaceViaHomePage(A.page);
+  await clickSomewhere(A.page);
+  await joinUser(B, SPACE_URL);
 
-  await waitForMemberCount(pageA, 2);
-  await waitForMemberCount(pageB, 2);
+  await waitForMemberCount(A.page, 2);
+  await waitForMemberCount(B.page, 2);
 
   // Wait until A's mic track exists, and confirm it starts enabled + unmuted.
-  await pageA.waitForFunction(
-    () => {
-      // @ts-expect-error
-      return window.__twolkDebug?.userMediaTrack != null;
-    },
+  await A.page.waitForFunction(
+    // @ts-expect-error
+    () => window.__twolkDebug?.userMediaTrack != null,
     null,
     { timeout: 20_000 },
   );
-  const enabledBefore = await pageA.evaluate(() => {
+  const enabledBefore = await A.page.evaluate(
     // @ts-expect-error
-    return window.__twolkDebug.userMediaTrack.enabled;
-  });
+    () => window.__twolkDebug.userMediaTrack.enabled,
+  );
   expect(enabledBefore, 'track enabled before mute').toBe(true);
-  expect(await otherMemberMuted(pageB), 'B sees A unmuted before').toBe(false);
+  expect(await otherMemberMuted(B.page), 'B sees A unmuted before').toBe(false);
 
   // A mutes.
-  await pageA.getByLabel('Mute').click();
+  await A.page.getByLabel('Mute').click();
 
   // A's outgoing track is disabled.
-  await pageA.waitForFunction(
-    () => {
-      // @ts-expect-error
-      return window.__twolkDebug?.userMediaTrack?.enabled === false;
-    },
+  await A.page.waitForFunction(
+    // @ts-expect-error
+    () => window.__twolkDebug?.userMediaTrack?.enabled === false,
     null,
     { timeout: 10_000 },
   );
 
-  // A's own button + self box reflect the muted state.
-  await expect(pageA.getByLabel('Unmute')).toBeVisible();
-  const aSelfMuted = await pageA.evaluate(() => {
+  // A's own button and self box reflect the muted state.
+  await expect(A.page.getByLabel('Unmute')).toBeVisible();
+  const aSelfMuted = await A.page.evaluate(() => {
     // @ts-expect-error
     const snap = window.__twolkDebug.space.getSnapshot();
     const self = snap.members.find((m: any) => m.id === snap.producer.id);
@@ -92,7 +71,7 @@ test('mute disables the audio track and propagates isMuted to other members', as
 
   // B sees A as muted, and renders exactly one mic-off icon (on A's box; B's
   // own mic button still shows the unmuted icon).
-  await pageB.waitForFunction(
+  await B.page.waitForFunction(
     () => {
       // @ts-expect-error
       const snap = window.__twolkDebug?.space?.getSnapshot?.();
@@ -103,19 +82,17 @@ test('mute disables the audio track and propagates isMuted to other members', as
     null,
     { timeout: 10_000 },
   );
-  await expect(pageB.locator('.tabler-icon-microphone-off')).toHaveCount(1);
+  await expect(B.page.locator('.tabler-icon-microphone-off')).toHaveCount(1);
 
   // A unmutes: track re-enables and B sees the change.
-  await pageA.getByLabel('Unmute').click();
-  await pageA.waitForFunction(
-    () => {
-      // @ts-expect-error
-      return window.__twolkDebug?.userMediaTrack?.enabled === true;
-    },
+  await A.page.getByLabel('Unmute').click();
+  await A.page.waitForFunction(
+    // @ts-expect-error
+    () => window.__twolkDebug?.userMediaTrack?.enabled === true,
     null,
     { timeout: 10_000 },
   );
-  await pageB.waitForFunction(
+  await B.page.waitForFunction(
     () => {
       // @ts-expect-error
       const snap = window.__twolkDebug?.space?.getSnapshot?.();
@@ -126,6 +103,6 @@ test('mute disables the audio track and propagates isMuted to other members', as
     { timeout: 10_000 },
   );
 
-  await ctxA.close();
-  await ctxB.close();
+  await A.ctx.close();
+  await B.ctx.close();
 });
