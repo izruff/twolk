@@ -440,6 +440,14 @@ export class SignalingServer {
 
             // TODO: Forward the notification to other servers via coordinator
             // (this will be implemented later).
+
+            // When this server has no members left in the space, unsubscribe so
+            // the coordinator can end the space once all servers have left.
+            if (space.members.size === 0) {
+              this.deleteSpace(space.uuid).catch((e: Error) => {
+                console.error("failed to delete space after last member left:", e.message);
+              });
+            }
           } else {
             // This should not happen since deleteMember is called only once
             console.log("warning: member not found when calling deleteMember");
