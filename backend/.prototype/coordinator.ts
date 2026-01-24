@@ -1,29 +1,3 @@
-/*
-
-Composition root for the coordinator-side services.
-
-In the future, the coordinator service should also handle scaling the SFU
-workers horizontally, managing load distribution and RTP packet transfer
-between two workers, and implementing router migration policies from one
-worker to another. For now, this class is responsible for assembling the
-sub-services and starting them in the right order.
-
-Sub-services:
-- RouterAllocator        — owns routers; publishes newRouterRequest.
-- TransportAllocator     — owns transports; publishes
-                           newWebRtcTransportRequest and
-                           C:transportParamsEvent.
-- SpaceService           — owns spaces and subscription state;
-                           handles subscribe/unsubscribeToSpaceRequest.
-- MemberService          — owns members; handles add/removeMemberRequest.
-- SpaceUpdateDispatcher  — translates S:* space updates into worker
-                           transportUpdateStream events and back.
-- ChannelPreAllocator    — picks which signaling server a new client
-                           should connect to; updated whenever servers
-                           register or deregister via the bus.
-
-*/
-
 import type { IMessageBus, QueueConsumerCallback } from "./bus.ts";
 import { RouterAllocator } from "./router-allocator.ts";
 import { TransportAllocator } from "./transport-allocator.ts";
@@ -37,6 +11,23 @@ import { RoundRobinStrategy, type IAllocationStrategy } from "./allocation-strat
 import { ChannelPreAllocator } from "./channel-pre-allocator.ts";
 
 
+/**
+ * The central service that orchestrates spaces, members, and the resources
+ * associated with them.
+ *
+ * TODO: Many of the methods here and in the subservices still violate the idea
+ * of physical separation between the coordinator, the signaling servers, the
+ * HTTP servers, and the SFU workers. It is an ongoing effort to discover and
+ * flag these violations.
+ *
+ * TODO(coordinator-mediation): Many of the subservices owned by this class are
+ * tightly coupled because they directly call each other's methods. We should
+ * have a publish-subscribe mechanism in place, similar to `boost::signals2`,
+ * to replace these direct references.
+ *
+ * TODO: In the future, this service will also perform creation and destruction
+ * of server and worker instances.
+ */
 export class Coordinator {
   bus: IMessageBus
 
@@ -56,9 +47,6 @@ export class Coordinator {
   ) {
     this.bus = bus;
 
-    // The "is this space subscribed?" check is supplied as a closure so
-    // TransportAllocator can be built before SpaceService — resolved
-    // lazily at call time once `this.spaceService` is set.
     const spaceStore = new InMemoryStore<string, Space>();
     const memberStore = new InMemoryStore<number, Member>();
     const routerIdGen = new ProcessCounterIdGenerator();
@@ -67,6 +55,8 @@ export class Coordinator {
 
     this.transportAllocator = new TransportAllocator(
       bus,
+      // This closure lets `TransportAllocator` be constructed before
+      // `SpaceService`.
       (uuid) => this.spaceService.hasSubscribers(uuid),
       transportIdGen,
     );
@@ -88,8 +78,7 @@ export class Coordinator {
     });
   }
 
-  // Starts every sub-service. Must be called once after construction;
-  // each sub-service is inert until then.
+  /** Starts sub-services and registers the join allocation handler. */
   start() {
     this.spaceService.start();
     this.memberService.start();
@@ -99,6 +88,7 @@ export class Coordinator {
       "tryJoinSpaceRequest", this.onTryJoinSpaceRequest.bind(this));
   }
 
+  /** Handles HTTP join preflight requests by returning a signaling server URL. */
   onTryJoinSpaceRequest: QueueConsumerCallback<"tryJoinSpaceRequest"> =
     ({ spaceUuid }, ack, nack) => {
       const space = this.spaceService.get(spaceUuid);

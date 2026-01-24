@@ -1,19 +1,16 @@
-/*
-
-Subscription-driven lifecycle policy (the default).
-
-Transitions:
-- initialized → running: first signaling server subscribes.
-- running → ended: last signaling server unsubscribes AND the space has
-  no members, OR the last member leaves AND no signaling servers are
-  subscribed.
-
-*/
-
 import type { SpaceLifecyclePolicy } from "./space-lifecycle-policy.ts";
 import type { SpaceStatus } from "./domain.ts";
 
 
+/**
+ * Ends spaces after both signaling subscriptions and members reach zero.
+ *
+ * Transition rules:
+ *
+ * - `initialized -> running` when a signaling server subscribes.
+ * - `running -> ended` when the space has no subscribed signaling servers and
+ *   no members.
+ */
 export class SubscriptionDrivenPolicy implements SpaceLifecyclePolicy {
   onCreated(_spaceId: string, _transition: (to: SpaceStatus) => Promise<void>): void {}
 

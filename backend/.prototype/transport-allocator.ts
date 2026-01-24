@@ -1,34 +1,43 @@
-/*
-
-Allocates and tracks WebRTC transports on behalf of members.
-
-Owns the `transports` map and the transport-id counter. Allocation goes
-through the bus as `newWebRtcTransportRequest` to whichever worker
-handles it. On the worker's ack the transport is marked allocated, the
-member-to-consumer map is updated for consumer transports, and (if any
-signaling server is subscribed to the space) a `C:transportParamsEvent`
-is published so the client can build its mediasoup-client transport.
-
-The "is space subscribed?" check is supplied as a callback to avoid a
-direct dependency on the space service; the eventual SpaceService can be
-substituted by passing its `isSubscribed` method.
-
-*/
+/**
+ * Allocates and tracks coordinator-side WebRTC transport records.
+ *
+ * Allocation creates local transport state, publishes
+ * `newWebRtcTransportRequest`, then stores the worker-returned client
+ * transport parameters. Producer transports are attached to `member.producer`.
+ * Consumer transports are indexed by source member in `memberToConsumerMap`.
+ *
+ * When any signaling server is subscribed to the owning space, allocation also
+ * publishes `C:transportParamsEvent` so the owning client can create its
+ * mediasoup-client transport.
+ */
 
 import type { IMessageBus } from "./bus.ts";
 import type { Member, Router, Transport } from "./domain.ts";
 import type { IIdGenerator } from "./id-gen-port.ts";
 
 
+/**
+ * Coordinator-side transport allocator.
+ *
+ * This class owns transport IDs and metadata. SFU workers own the actual media
+ * transports and are addressed through bus requests.
+ *
+ * TODO(coordinator-mediation): Currently, the transport allocator publishes
+ * space updates in `allocate()`. This induces coupling with `SpaceService`
+ * through `hasSpaceSubscribers`. To avoid this, we should delegate this job to
+ * the coordinator; see the TODO in `Coordinator`.
+ */
 export class TransportAllocator {
   bus: IMessageBus
-  // Whether any signaling server is subscribed to this space — if so, the
-  // C:transportParamsEvent broadcast goes out (and any subscribed server
-  // will pick it up via its consume on spaceUpdateStream). Supplied as a
-  // callback to avoid a direct dependency on SpaceService.
-  hasSpaceSubscribers: (spaceUuid: string) => boolean
-
   idGen: IIdGenerator
+
+  /**
+   * Callback supplied by the constructor callee to check whether any signaling
+   * server is subscribed to a space.
+   *
+   * TODO(coordinator-mediation): This function is subject for removal.
+   */
+  hasSpaceSubscribers: (spaceUuid: string) => boolean
 
   transports: Map<number, Transport> = new Map()
 
@@ -46,6 +55,15 @@ export class TransportAllocator {
     return this.transports.get(transportId);
   }
 
+  /**
+   * Allocates a producer or consumer transport for a member.
+   *
+   * If `consumesFromTransportId` is present, the transport being allocated
+   * is a consumer transport that consumes from that existing producer
+   * transport. Otherwise, it is a producer transport.
+   *
+   * TODO(coordinator-mediation): This function is subject to change.
+   */
   async allocate(
     router: Router,
     member: Member,
@@ -63,9 +81,8 @@ export class TransportAllocator {
     this.transports.set(id, transport);
     router.transports.set(id, transport);
     if (consumesFromTransportId === undefined) {
-      // Only a producer transport should be tracked as the member's
-      // producer; a consumer transport is tracked via
-      // memberToConsumerMap once the worker acks.
+      // Only a producer transport is tracked as the member producer. Consumer
+      // transports are tracked in memberToConsumerMap after worker ack.
       member.producer = transport;
     }
 
@@ -104,10 +121,9 @@ export class TransportAllocator {
               options: transport.metadata.options,
             },
           }, () => {
-            // Nothing for now
+            // Notification ack is not used.
           }, (_e: Error) => {
-            // Since this event is just a notification, we ignore for now.
-            // TODO: Client should handle retry (implement in signaling server).
+            // TODO: Add retry or client-side recovery for missed params events.
           });
         }
       }, (e: Error) => {
@@ -117,8 +133,9 @@ export class TransportAllocator {
     });
   }
 
+  /** Removes a transport from coordinator state. */
   async remove(transportId: number): Promise<void> {
-    // TODO: Need to send message to SFU worker to deallocate.
+    // TODO: Send a worker command to close the actual media transport.
     this.transports.delete(transportId);
   }
 }

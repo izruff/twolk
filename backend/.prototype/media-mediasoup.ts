@@ -1,12 +1,6 @@
-/*
-
-Mediasoup adapter for the media-layer port. Wraps the mediasoup server
-SDK so `SfuWorker` only sees `IMediaWorker` / `IMediaRouter` / etc.
-
-All mediasoup-specific config (listen IPs, codecs, port range, ICE
-preferences) is contained here. The port surface has none of it.
-
-*/
+/**
+ * `mediasoup` implementation of the media-layer port.
+ */
 
 import mediasoup from "mediasoup";
 
@@ -19,6 +13,7 @@ import type {
 import { getPublicIpAddress } from "./utils/network.ts";
 
 
+/** Audio codecs enabled for every mediasoup router in the prototype. */
 const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
   {
     kind: "audio",
@@ -29,6 +24,7 @@ const MEDIA_CODECS: mediasoup.types.RouterRtpCodecCapability[] = [
 ];
 
 
+/** Wraps a mediasoup worker as an `IMediaWorker`. */
 export class MediasoupMediaWorker implements IMediaWorker {
   worker: mediasoup.types.Worker
 
@@ -36,6 +32,7 @@ export class MediasoupMediaWorker implements IMediaWorker {
     this.worker = worker;
   }
 
+  /** Creates a mediasoup worker constrained to the configured RTC port range. */
   static async create(
     rtcPortRange: { min: number, max: number },
   ): Promise<MediasoupMediaWorker> {
@@ -46,10 +43,12 @@ export class MediasoupMediaWorker implements IMediaWorker {
     return new MediasoupMediaWorker(worker);
   }
 
+  /** Registers a callback for mediasoup worker death. */
   onDied(callback: (err: Error) => void): void {
     this.worker.on("died", callback);
   }
 
+  /** Creates a mediasoup router with the prototype media codecs. */
   async createRouter(): Promise<IMediaRouter> {
     const router = await this.worker.createRouter({ mediaCodecs: MEDIA_CODECS });
     return new MediasoupRouterAdapter(router);
@@ -57,6 +56,7 @@ export class MediasoupMediaWorker implements IMediaWorker {
 }
 
 
+/** Wraps a mediasoup router as an `IMediaRouter`. */
 class MediasoupRouterAdapter implements IMediaRouter {
   router: mediasoup.types.Router
 
@@ -64,10 +64,12 @@ class MediasoupRouterAdapter implements IMediaRouter {
     this.router = router;
   }
 
+  /** Router RTP capabilities forwarded to browser-side mediasoup-client. */
   get rtpCapabilities(): RtpCapabilities {
     return this.router.rtpCapabilities;
   }
 
+  /** Creates a WebRTC transport with prototype ICE and transport settings. */
   async createWebRtcTransport(): Promise<IMediaTransport> {
     const transport = await this.router.createWebRtcTransport({
       listenIps: [
@@ -85,6 +87,7 @@ class MediasoupRouterAdapter implements IMediaRouter {
 }
 
 
+/** Wraps a mediasoup WebRTC transport as an `IMediaTransport`. */
 class MediasoupTransportAdapter implements IMediaTransport {
   transport: mediasoup.types.WebRtcTransport
 
@@ -92,6 +95,7 @@ class MediasoupTransportAdapter implements IMediaTransport {
     this.transport = transport;
   }
 
+  /** Client transport initialization parameters. */
   get params(): TransportInitParams {
     return {
       id: this.transport.id,
@@ -101,15 +105,18 @@ class MediasoupTransportAdapter implements IMediaTransport {
     };
   }
 
+  /** Connects the mediasoup transport with remote DTLS parameters. */
   async connect(dtlsParameters: DtlsParameters): Promise<void> {
     await this.transport.connect({ dtlsParameters });
   }
 
+  /** Creates a mediasoup producer on this transport. */
   async produce(kind: MediaKind, rtpParameters: RtpParameters): Promise<IMediaProducer> {
     const producer = await this.transport.produce({ kind, rtpParameters });
     return new MediasoupProducerAdapter(producer);
   }
 
+  /** Creates a mediasoup consumer on this transport. */
   async consume(
     producerId: string,
     rtpCapabilities: RtpCapabilities,
@@ -125,6 +132,7 @@ class MediasoupTransportAdapter implements IMediaTransport {
 }
 
 
+/** Wraps a mediasoup producer as an `IMediaProducer`. */
 class MediasoupProducerAdapter implements IMediaProducer {
   producer: mediasoup.types.Producer
 
@@ -132,12 +140,14 @@ class MediasoupProducerAdapter implements IMediaProducer {
     this.producer = producer;
   }
 
+  /** Mediasoup producer ID. */
   get id(): string {
     return this.producer.id;
   }
 }
 
 
+/** Wraps a mediasoup consumer as an `IMediaConsumer`. */
 class MediasoupConsumerAdapter implements IMediaConsumer {
   consumer: mediasoup.types.Consumer
 
@@ -145,22 +155,27 @@ class MediasoupConsumerAdapter implements IMediaConsumer {
     this.consumer = consumer;
   }
 
+  /** Mediasoup consumer ID. */
   get id(): string {
     return this.consumer.id;
   }
 
+  /** Producer ID consumed by this consumer. */
   get producerId(): string {
     return this.consumer.producerId;
   }
 
+  /** Media kind consumed by this consumer. */
   get kind(): MediaKind {
     return this.consumer.kind;
   }
 
+  /** RTP parameters forwarded to the browser client. */
   get rtpParameters(): RtpParameters {
     return this.consumer.rtpParameters;
   }
 
+  /** Resumes this mediasoup consumer. */
   async resume(): Promise<void> {
     await this.consumer.resume();
   }

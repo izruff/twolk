@@ -1,29 +1,3 @@
-/*
-
-Manages the coordinator's view of spaces and which signaling servers
-have subscribed to them.
-
-Owns:
-- the `spaces` map (uuid → Space)
-- `spaceSubscriptions` (serverId → set of uuids) and the inverse
-  `spaceToSubscribedMap` (uuid → set of serverIds)
-
-Handles the bus requests `createSpaceRequest`, `readSpaceRequest`,
-`subscribeToSpaceRequest`, and `unsubscribeFromSpaceRequest`. Spaces are
-created explicitly via `createSpaceRequest` (forwarded from the HTTP
-server); subscribing no longer creates them.
-
-A space moves through three statuses: "initialized" (created, nobody has
-joined), "running" (at least one subscribe has promoted it and allocated
-its router), and "ended" (last subscriber left). Subscribing to a missing
-or ended space is rejected.
-
-Each space carries a SpaceLifecyclePolicy that decides when status
-transitions occur. applyTransition owns all side effects of every
-transition so policies never need to touch infrastructure directly.
-
-*/
-
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -36,15 +10,29 @@ import type { SpaceLifecyclePolicy } from "./space-lifecycle-policy.ts";
 import { SubscriptionDrivenPolicy } from "./subscription-driven-policy.ts";
 
 
+/**
+ * Builds a lifecycle policy from a config or request policy type using
+ * default settings.
+ *
+ * TODO: This is subject to change as we add more policies and extend them.
+ */
 export function defaultPolicyFactory(type: string): SpaceLifecyclePolicy {
   if (type === "subscription-driven") return new SubscriptionDrivenPolicy();
   throw new Error("unknown space lifecycle policy type: " + type);
 }
 
 
+/**
+ * Coordinator-side subservice that manages coordinator-side spaces.
+ *
+ * This service maintains space records, handles creation of spaces, defines
+ * the behavior of lifecycle transitions, and handles subscription requests.
+ */
 export class SpaceService {
   bus: IMessageBus
+  // TODO: This is subject for removal; see the TODO in `applyTransition()`.
   routerAllocator: RouterAllocator
+  // TODO: This is subject to change as we add more policies and extend them.
   policyFactory: (type: string) => SpaceLifecyclePolicy
 
   spaces: IStore<string, Space>
@@ -66,6 +54,7 @@ export class SpaceService {
     this.policyFactory = policyFactory;
   }
 
+  /** Registers bus consumers handled by this service. */
   start() {
     this._cancelConsumers.push(
       this.bus.consume("createSpaceRequest",
@@ -79,14 +68,17 @@ export class SpaceService {
     );
   }
 
+  /** Returns the coordinator-side space record. */
   get(uuid: string): Space | undefined {
     return this.spaces.get(uuid);
   }
 
+  /** Returns true when any signaling server is subscribed to the space. */
   hasSubscribers(uuid: string): boolean {
     return this.spaceToSubscribedMap.has(uuid);
   }
 
+  /** Returns true when a specific signaling server mirrors a space. */
   isSubscribed(serverId: number, uuid: string): boolean {
     if (!this.spaceSubscriptions.has(serverId)) {
       return false;
@@ -94,6 +86,7 @@ export class SpaceService {
     return this.spaceSubscriptions.get(serverId)!.has(uuid);
   }
 
+  /** Records that a signaling server now mirrors a space. */
   subscribe(serverId: number, uuid: string) {
     if (!this.spaceSubscriptions.has(serverId)) {
       this.spaceSubscriptions.set(serverId, new Set());
@@ -106,6 +99,7 @@ export class SpaceService {
     this.spaceToSubscribedMap.get(uuid)!.add(serverId);
   }
 
+  /** Removes a signaling server subscription for a space. */
   unsubscribe(serverId: number, uuid: string) {
     if (this.spaceSubscriptions.has(serverId)) {
       const set = this.spaceSubscriptions.get(serverId)!;
@@ -124,9 +118,11 @@ export class SpaceService {
     }
   }
 
-  // Creates a space with the given data and lifecycle policy. The policy's
-  // onCreated hook is called immediately with a transition callback so
-  // timer-based policies can schedule transitions before any client joins.
+  /**
+   * Creates a space with the requested lifecycle policy.
+   *
+   * TODO: This is subject to change as we add more policies and extend them.
+   */
   create(data: SpaceData, policyType: string): string {
     const uuid = randomUUID();
     const policy = this.policyFactory(policyType);
@@ -141,15 +137,24 @@ export class SpaceService {
     return uuid;
   }
 
-  // Central method for all status transitions. Owns every side effect:
-  // - initialized → running: allocates the primary router.
-  // - running → ended: deallocates the router and notifies the policy.
-  // Policies call the transition callback (supplied via onCreated) instead
-  // of touching these side effects directly.
+  /**
+   * Applies a lifecycle transition and its infrastructure side effects.
+   *
+   * Transitions and their side effects:
+   *
+   * - `initialized -> running`: allocates the primary router.
+   * - `running -> ended`: removes the primary router and notifies the
+   *   lifecycle policy.
+   *
+   * Invalid transitions are ignored.
+   */
   async applyTransition(space: Space, to: SpaceStatus): Promise<void> {
     if (space.status === to) return;
 
     if (to === "running" && space.status === "initialized") {
+      // TODO: This is also called in `MemberService.onAddMemberRequest`.
+      // We need to decide who has the responsibility of allocating a router
+      // for the first time.
       await this.routerAllocator.allocate(space);
     } else if (to === "ended" && space.status === "running") {
       if (space.primaryRouter !== null) {
@@ -166,8 +171,7 @@ export class SpaceService {
     space.status = to;
   }
 
-  // Called by MemberService after a member is removed. Delegates the
-  // "should the space end?" decision to the space's lifecycle policy.
+  /** Lets the lifecycle policy react after `MemberService` removes a member. */
   notifyMemberLeft(uuid: string) {
     const space = this.spaces.get(uuid);
     if (space === undefined) return;
@@ -228,8 +232,8 @@ export class SpaceService {
           }
           this.subscribe(serverId, uuid);
 
-          // Deep-copy the objects instead of sharing reference (only because
-          // we are simulating everything in one process).
+          // Deep-copy so the signaling server mirror does not share references
+          // with coordinator state in this single-process prototype.
           ack({
             clientSideSpace: {
               uuid: space.uuid,

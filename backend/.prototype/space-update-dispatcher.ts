@@ -1,27 +1,19 @@
-/*
-
-Routes S:* events (from signaling server) into the right
-C:transportUpdate calls on the worker, and reflects worker acks back to
-the space as the appropriate C:* event.
-
-Each S: event corresponds to a step in the per-member transport/produce/
-consume handshake. The handler typically:
-  1. resolves the member + transport from the space
-  2. publishes a worker-bound transport update with the same payload
-  3. acks (and sometimes publishes a follow-up notification) on worker ack
-
-The dispatcher reads state through SpaceService and TransportAllocator;
-it doesn't own any state of its own.
-
-*/
-
 import type {
-  IMessageBus, QueueConsumerCallback,
+  IMessageBus, QueueConsumerCallback, QueueResponseTypeMap,
 } from "./bus.ts";
 import type { SpaceService } from "./space-service.ts";
 import type { TransportAllocator } from "./transport-allocator.ts";
 
+type TransportUpdateAck = Exclude<QueueResponseTypeMap["transportUpdateStream"], void>;
 
+
+/**
+ * Coordinator-side subservice that dispatches space and transport update
+ * stream messages between other connected services.
+ *
+ * TODO: Replace the long event branch with per-event handlers so validation,
+ * worker command publishing, and response mapping can be tested separately.
+ */
 export class SpaceUpdateDispatcher {
   bus: IMessageBus
   spaceService: SpaceService
@@ -39,6 +31,7 @@ export class SpaceUpdateDispatcher {
     this.transportAllocator = transportAllocator;
   }
 
+  /** Registers bus consumers handled by this dispatcher. */
   start() {
     this._cancelConsumers.push(
       this.bus.consume("spaceUpdateStream", this.onSpaceUpdate.bind(this)),
@@ -46,6 +39,7 @@ export class SpaceUpdateDispatcher {
     );
   }
 
+  /** Handles signaling-server-originated space update events. */
   onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
     ({ uuid, type, payload }, ack, nack) => {
       if (type.startsWith("C:")) return;
@@ -69,7 +63,7 @@ export class SpaceUpdateDispatcher {
           return;
         }
 
-        // Notify SFU worker to initiate transport connection
+        // Notify the SFU worker to connect the producer transport.
         if (transport.status !== "connected") {
           this.bus.publish("transportUpdateStream", {
             id: transport.id,
@@ -81,7 +75,7 @@ export class SpaceUpdateDispatcher {
             transport.status = "connected";
             ack();
           }, (e: Error) => {
-            // TODO: Need retry mechanism
+            // TODO: Add retry or client-visible recovery for worker nacks.
             nack(new Error(
               "transportUpdate for C:transportConnectEvent nacked: " +
               e.message));
@@ -96,16 +90,15 @@ export class SpaceUpdateDispatcher {
         }
 
         const transport = member.producer;
-        // if (transport === null || transport.status != "connected") {
-        //   nack(new Error("transport not connected"));
-        //   return;
-        // }
+        // TODO: Decide whether produce requires connected coordinator status.
+        // The current prototype allows produce after allocation because the
+        // worker is authoritative and client event ordering can race.
         if (transport === null || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
 
-        // Notify SFU worker to start producing
+        // Notify the SFU worker to start producing.
         this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportProducerProduceEvent",
@@ -114,10 +107,10 @@ export class SpaceUpdateDispatcher {
             rtpParameters: payload.data.rtpParameters,
           },
         }, (resp) => {
-          ack({ id: resp!.id });
-          // Notify the space members about the new producer. Any
-          // subscribed signaling server will pick this up from its
-          // consume on spaceUpdateStream.
+          // TODO: Split transport update response types by event.
+          ack({ id: (resp as TransportUpdateAck).id });
+          // Notify subscribed signaling servers that this producer can be
+          // consumed.
           if (this.spaceService.hasSubscribers(uuid)) {
             this.bus.publish("spaceUpdateStream", {
               uuid,
@@ -126,14 +119,13 @@ export class SpaceUpdateDispatcher {
                 memberId: payload.memberId,
               },
             }, () => {
-              // Do nothing for now
+              // Notification ack is not used.
             }, (_e: Error) => {
-              // Since this event is just a notification, we do nothing.
-              // Client should treat this as a best-effort notification.
+              // TODO: Add recovery for missed best-effort producer events.
             });
           }
         }, (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or client-visible recovery for worker nacks.
           nack(new Error(
             "transportUpdate for C:transportProducerProduceEvent nacked: " +
             e.message));
@@ -153,7 +145,7 @@ export class SpaceUpdateDispatcher {
           return;
         }
 
-        // Notify SFU worker to initiate transport connection
+        // Notify the SFU worker to connect the consumer transport.
         if (transport.status !== "connected") {
           this.bus.publish("transportUpdateStream", {
             id: transport.id,
@@ -165,7 +157,7 @@ export class SpaceUpdateDispatcher {
             transport.status = "connected";
             ack();
           }, (e: Error) => {
-            // TODO: Need retry mechanism
+            // TODO: Add retry or client-visible recovery for worker nacks.
             nack(new Error(
               "transportUpdate for C:transportConnectEvent nacked: " +
               e.message));
@@ -187,32 +179,33 @@ export class SpaceUpdateDispatcher {
 
         const transport = member.memberToConsumerMap.get(
           payload.data.sourceMemberId);
-        // if (transport === undefined || transport.status !== "connected") {
-        //   nack(new Error("transport not connected"));
-        //   return;
-        // }
+        // TODO: Decide whether consume requires connected coordinator status.
+        // The current prototype allows consume after allocation because the
+        // worker can buffer until the producer exists.
         if (transport === undefined || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
 
-        // Notify SFU worker to start consuming
+        // Notify the SFU worker to start consuming.
         this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportConsumerConsumeEvent",
           payload: {
             rtpCapabilities: payload.data.rtpCapabilities,
-            producingTransportId: sourceMember.producer!.id,  // This should exist
+            // TODO: Validate sourceMember.producer before publishing.
+            producingTransportId: sourceMember.producer!.id,
           },
         }, (resp) => {
+          // TODO: Split transport update response types by event.
           ack({
-            id: resp!.id,
-            producerId: resp!.producerId,
-            kind: resp!.kind,
-            rtpParameters: resp!.rtpParameters,
+            id: (resp as TransportUpdateAck).id,
+            producerId: (resp as TransportUpdateAck).producerId,
+            kind: (resp as TransportUpdateAck).kind,
+            rtpParameters: (resp as TransportUpdateAck).rtpParameters,
           });
         }, (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or client-visible recovery for worker nacks.
           nack(new Error(
             "transportUpdate for C:transportConsumerConsumeEvent nacked: " +
             e.message));
@@ -227,17 +220,15 @@ export class SpaceUpdateDispatcher {
 
         const transport = member.memberToConsumerMap.get(
           payload.data.sourceMemberId);
-        // if (transport === undefined || transport.status !== "connected") {
-        //   nack(new Error("transport not connected"));
-        //   return;
-        // }
+        // TODO: Decide whether resume requires connected coordinator status.
+        // The current prototype lets the worker validate the consumer.
         if (transport === undefined || transport.status === "unallocated") {
           nack(new Error("transport not allocated"));
           return;
         }
 
-        // Notify SFU worker to resume consuming
-        // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+        // Notify the SFU worker to resume consuming.
+        // See https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
         this.bus.publish("transportUpdateStream", {
           id: transport.id,
           type: "C:transportConsumerResumeEvent",
@@ -245,7 +236,7 @@ export class SpaceUpdateDispatcher {
         }, () => {
           ack();
         }, (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or client-visible recovery for worker nacks.
           nack(new Error(
             "transportUpdate for C:transportConsumerResumeEvent nacked: " +
             e.message));
@@ -256,6 +247,7 @@ export class SpaceUpdateDispatcher {
       }
     }
 
+  /** Handles worker-originated transport updates. */
   onTransportUpdate: QueueConsumerCallback<"transportUpdateStream"> =
     ({ id, type, payload }, ack, nack) => {
       if (type.startsWith("C:")) return;
@@ -267,7 +259,7 @@ export class SpaceUpdateDispatcher {
       }
 
       if (false) {
-        // Currently no transport updates to handle
+        // No worker-originated transport updates are defined yet.
       } else {
         nack(new Error("unexpected error: unknown transport update type"));
       }

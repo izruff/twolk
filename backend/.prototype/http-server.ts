@@ -1,23 +1,3 @@
-/*
-
-HTTP server facing the frontend.
-
-A thin entry point that translates HTTP requests into bus requests and the
-bus responses back into HTTP responses, the same way SignalingServer
-translates client-channel events. It owns no state of its own; the
-services behind the bus are the source of truth.
-
-Today it only exposes Space CRUD; more resources will be added here later.
-
-Routes:
-- POST /space   body: SpaceData          -> 201 { uuid }
-- GET  /space   query: ?uuid=<uuid>      -> 200 { ...SpaceData, status } | 404
-
-Speaks https when given TlsOptions, plain http otherwise — the composition
-root decides based on ENVIRONMENT.
-
-*/
-
 import http from "node:http";
 
 import type { IMessageBus } from "./bus.ts";
@@ -25,6 +5,19 @@ import type { SpaceData } from "./domain.ts";
 import { createNodeHttpServer, type TlsOptions } from "./utils/tls.ts";
 
 
+/**
+ * Frontend-facing HTTP API for the prototype.
+ *
+ * This server translates HTTP requests from the browser frontend into bus
+ * requests, communicates it to the coordinator, and translates bus responses
+ * to JSON.
+ *
+ * Routes:
+ *
+ * - `POST /space` with `SpaceData`: creates a space.
+ * - `GET /space?uuid=<uuid>`: reads public space data and status.
+ * - `GET /space/try-join?uuid=<uuid>`: returns a signaling server URL.
+ */
 export class FrontendFacingHttpServer {
   bus: IMessageBus
   port: number
@@ -40,6 +33,7 @@ export class FrontendFacingHttpServer {
     this.allowedOrigin = allowedOrigin;
   }
 
+  /** Creates the Node server and starts listening on the configured port. */
   start() {
     this.server = createNodeHttpServer(this.tlsOptions, (req, res) => {
       this.handleRequest(req, res);
@@ -47,11 +41,13 @@ export class FrontendFacingHttpServer {
     this.server.listen(this.port);
   }
 
+  /** Stops the Node server if it is running. */
   stop() {
     this.server?.close();
     this.server = null;
   }
 
+  /** Routes one incoming HTTP request. */
   handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
     // CORS: the frontend is served from a different origin (port).
     res.setHeader("Access-Control-Allow-Origin", this.allowedOrigin);
@@ -59,7 +55,7 @@ export class FrontendFacingHttpServer {
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
     if (req.method === "OPTIONS") {
-      // Preflight request — headers above are all the browser needs.
+      // Preflight request. The CORS headers above are all the browser needs.
       res.writeHead(204);
       res.end();
       return;
@@ -78,6 +74,7 @@ export class FrontendFacingHttpServer {
     }
   }
 
+  /** Handles `POST /space` by creating a coordinator space. */
   handleCreateSpace(req: http.IncomingMessage, res: http.ServerResponse) {
     readBody(req)
       .then((body) => {
@@ -89,8 +86,7 @@ export class FrontendFacingHttpServer {
           return;
         }
 
-        // TODO: policyType is subject to change once the frontend can
-        // specify a policy per space.
+        // TODO: Accept policyType from the frontend once space creation needs it.
         this.bus.publish("createSpaceRequest",
           { data, policyType: "subscription-driven" },
           ({ uuid }) => { sendJson(res, 201, { uuid }); },
@@ -99,6 +95,7 @@ export class FrontendFacingHttpServer {
       .catch((e: Error) => { sendJson(res, 400, { error: e.message }); });
   }
 
+  /** Handles `GET /space` by reading public coordinator space state. */
   handleReadSpace(url: URL, res: http.ServerResponse) {
     const uuid = url.searchParams.get("uuid");
     if (uuid === null) {
@@ -111,9 +108,12 @@ export class FrontendFacingHttpServer {
       () => { sendJson(res, 404, { error: "space not found" }); });
   }
 
-  // Returns the URL of the signaling server the client should connect to for
-  // the given space. 404 if the space does not exist, is ended, or no servers
-  // are available.
+  /**
+   * Handles `GET /space/try-join` by allocating a signaling server URL.
+   *
+   * Returns 404 when the space is missing, ended, or no signaling server is
+   * available.
+   */
   handleTryJoinSpace(url: URL, res: http.ServerResponse) {
     const spaceUuid = url.searchParams.get("uuid");
     if (spaceUuid === null) {
@@ -128,6 +128,7 @@ export class FrontendFacingHttpServer {
 }
 
 
+/** Reads a full HTTP request body as UTF-8 text. */
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -138,6 +139,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 }
 
 
+/** Parses and validates request JSON as `SpaceData`. */
 function parseSpaceData(body: string): SpaceData {
   let parsed: unknown;
   try {
@@ -156,6 +158,7 @@ function parseSpaceData(body: string): SpaceData {
 }
 
 
+/** Writes a JSON response with the given status code. */
 function sendJson(res: http.ServerResponse, status: number, body: unknown) {
   const payload = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json" });

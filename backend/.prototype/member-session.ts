@@ -1,19 +1,3 @@
-/*
-
-Per-channel state for one client. Created by SignalingServer the moment
-a channel is accepted; runs the join handshake, wires the channel's
-event listeners, and tears everything down on close.
-
-Owns:
-- the IClientChannel
-- the memberId, once prepareMember resolves
-- the lifetime of the channel's event listeners
-
-Delegates all cross-channel state (spaces, members map, the
-memberId→channel registry) and bus publishes to SignalingServer.
-
-*/
-
 import type { IMessageBus, SpaceUpdateSTypes } from "./bus.ts";
 import type { IClientChannel } from "./client-channel-port.ts";
 import type { MemberData, MemberState } from "./domain.ts";
@@ -23,9 +7,13 @@ import type {
 import { getClientSideSpace } from "./server.ts";
 
 
-// Client events that the server just forwards to the coordinator as the
-// matching `S:*` space update, then acks the client when the coordinator
-// acks the server. Produce/consume add extra fields to their acks.
+/**
+ * Client events forwarded to the coordinator as matching `S:*` updates.
+ *
+ * The session acknowledges the client after the coordinator acknowledges the
+ * forwarded space update. Produce and consume acknowledgements include
+ * additional media ids and parameters.
+ */
 const FORWARD_AND_ACK_LISTEN_EVENTS_MAP: Map<keyof ClientToServerEvents,
   SpaceUpdateSTypes> = new Map([
     ["transportProducerConnect", "S:memberProducerConnectEvent"],
@@ -37,8 +25,20 @@ const FORWARD_AND_ACK_LISTEN_EVENTS_MAP: Map<keyof ClientToServerEvents,
 
 
 type Channel = IClientChannel<ClientToServerEvents, ServerToClientEvents>;
+type SimpleForwardAckEvent = "transportProducerConnectAck"
+  | "transportConsumerConnectAck"
+  | "transportConsumerResumeAck";
 
 
+/**
+ * An abstraction of a member connection to the signaling server.
+ * 
+ * It owns one client channel and its member lifecycle, and handles channel
+ * messages from and to the client via the relevant application-level protocol.
+ *
+ * TODO: Track registered handlers so `close` cleanup can remove them before
+ * dropping the channel reference.
+ */
 export class MemberSession {
   channel: Channel
   bus: IMessageBus
@@ -52,6 +52,7 @@ export class MemberSession {
     this.server = server;
   }
 
+  /** Starts the join handshake and client event handling for this channel. */
   async start(): Promise<void> {
     this.channel.onClose(() => {
       if (this.memberId !== null) {
@@ -79,15 +80,14 @@ export class MemberSession {
 
       const space = this.server.getSpace(spaceUuid)!;
 
-      // Start listening to client messages
+      // Start listening to client messages.
 
       this.channel.on("createWebRtcTransport", (async (_args, _cId) => {
-        // TODO: We're supposed to let the coordinator know to check if the
-        // transport is being processed, and start processing if not.
+        // TODO: Implement client-requested transport retry or readiness check.
       }) as ClientToServerEvents["createWebRtcTransport"]);
 
       this.channel.on("resendSpaceInit", (async (_cId) => {
-        // TODO: Handle this; we don't need to tell the coordinator.
+        // TODO: Resend spaceInit from this server mirror without coordinator IO.
       }) as ClientToServerEvents["resendSpaceInit"]);
 
       this.channel.on("updateMemberState", (async ({ newState }, cId) => {
@@ -95,13 +95,12 @@ export class MemberSession {
           this.server.updateMember(memberId, newState);
           this.channel.emit("updateMemberStateAck", cId);
         } catch (_err) {
-          // TODO: Need to handle failure properly
+          // TODO: Send a failure acknowledgement shape instead of success ack.
           this.channel.emit("updateMemberStateAck", cId);
         }
       }) as ClientToServerEvents["updateMemberState"]);
 
-      // For all these message types, the signaling server simply forwards it
-      // to the coordinator.
+      // Forward media handshake events to the coordinator.
       FORWARD_AND_ACK_LISTEN_EVENTS_MAP.forEach((spaceUpdateType,
         clientEventType) => {
           this.channel.on(clientEventType, (async (data: any, cId: string) => {
@@ -110,40 +109,37 @@ export class MemberSession {
               type: spaceUpdateType,
               payload: { memberId, data },
             } as any, (resp: any) => {
-              // Acknowledge to the client. Produce/consume require extra
-              // fields from the response to set up the client-side
-              // producer/consumer object.
+              // Produce and consume require extra fields to create the
+              // browser-side producer or consumer.
               if (clientEventType === "transportProducerProduce") {
                 this.channel.emit("transportProducerProduceAck", cId, resp!.id);
               } else if (clientEventType === "transportConsumerConsume") {
                 this.channel.emit("transportConsumerConsumeAck", cId,
                   resp!.id, resp!.producerId!, resp!.kind!, resp!.rtpParameters!);
               } else {
-                this.channel.emit((clientEventType + "Ack") as keyof ServerToClientEvents, cId);
+                this.channel.emit((clientEventType + "Ack") as SimpleForwardAckEvent, cId);
               }
             }, (e: Error) => {
-              // TODO: Need retry mechanism, then notify client on failure
+              // TODO: Add retry or emit client-visible failure.
               console.error(`[${this.channel.id}] failed to forward ${clientEventType}:`,
                 e.message);
             });
           }) as any);
         });
 
-      // This message also serves as confirmation that the client can start
-      // sending messages back to the server.
+      // This message also confirms that the client can send media commands.
       this.channel.emit("memberEvent", "spaceInit", {
         receivingMemberId: memberId,
         routerRtpCapabilities: space.routerRtpCapabilities,
         clientSideSpace: getClientSideSpace(space),
       });
 
-      // This map will be used to broadcast updates, and this insertion needs
-      // to be performed with the memberEvent emission atomically; we want to
-      // make sure no updates are missed.
+      // Register the channel after spaceInit so broadcasts cannot arrive
+      // before the initial space snapshot reaches the client.
       this.memberId = memberId;
       this.server.registerChannel(memberId, this.channel);
     } catch (err: any) {
-      // TODO: Need a proper error message.
+      // TODO: Return a specific client-safe connection error.
       console.log(err);
       this.channel.emit("connectionFailed", { message: "" });
     }

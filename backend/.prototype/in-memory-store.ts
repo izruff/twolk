@@ -1,14 +1,12 @@
-/*
-
-In-memory IStore adapter. Backed by a plain Map. Used by the default
-composition root; tests can either reuse this or build a fake with the
-same shape if they want introspection.
-
-*/
-
 import type { IStore } from "./store-port.ts";
 
 
+/**
+ * In-memory `IStore` adapter backed by a plain `Map`.
+ *
+ * This is used for the prototype which runs all coordinator-side services
+ * in a single process. If used in production, consider making it thread-safe.
+ */
 export class InMemoryStore<K, V> implements IStore<K, V> {
   data: Map<K, V> = new Map();
 

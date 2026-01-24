@@ -1,17 +1,3 @@
-/*
-
-Implementation of the SFU worker.
-- Receives and sends RTP packets from and to client via WebRTC.
-- Routes RTP packets between clients in the same space.
-- Facilitates transport to other media-related workers.
-
-The worker no longer talks to mediasoup directly. Everything goes
-through the IMediaWorker / IMediaRouter / IMediaTransport / IMediaProducer
-/ IMediaConsumer port; the runtime implementation (currently mediasoup,
-eventually a hand-rolled SFU) is selected by the composition root.
-
-*/
-
 import type { IMessageBus, QueueConsumerCallback, QueueResponseTypeMap } from "./bus.ts";
 import type {
   IMediaWorker, IMediaRouter, IMediaTransport,
@@ -19,6 +5,7 @@ import type {
 } from "./media-port.ts";
 
 
+/** Worker-local media router state. */
 interface Router {
   id: number;
   mediaRouter: IMediaRouter;
@@ -29,12 +16,14 @@ interface Router {
   producerToConsumersSet: Map<number, Set<number>>;
 }
 
+/** Worker-local WebRTC transport state. */
 interface WebRtcTransport {
   id: number;
   mediaTransport: IMediaTransport;
   router: Router;
 }
 
+/** Buffered consume request waiting for its producer to exist. */
 interface PendingConsume {
   consumerTransport: WebRtcTransport;
   producingTransport: WebRtcTransport;
@@ -44,6 +33,16 @@ interface PendingConsume {
 }
 
 
+/**
+ * SFU worker facade for the prototype bus.
+ *
+ * This class owns worker-local router, transport, producer, and consumer maps.
+ * It consumes messages from the bus targeted to a specific SFU worker and
+ * delegates media work to it via the interfaces in `media-port.ts`.
+ *
+ * TODO: Add worker-side close commands and media event forwarding so
+ * coordinator state can react to transport, producer, and consumer closure.
+ */
 export class SfuWorker {
   workerId: number
   mediaWorker: IMediaWorker
@@ -52,13 +51,13 @@ export class SfuWorker {
   routers: Map<number, Router>
   transports: Map<number, WebRtcTransport>
 
-  // Consume requests received before the producing transport has a producer.
-  // Keyed by producing transport id; flushed when that producer is created.
+  /** Consume requests keyed by producing transport ID until a producer exists. */
   pendingConsumes: Map<number, PendingConsume[]>
 
-  // Cancellation handles for the bus subscriptions registered in start().
+  /** Cancellation handles for bus subscriptions registered in `start()`. */
   _cancelConsumers: (() => void)[] = []
-  // Deregisters this worker from the bus on disconnect.
+
+  /** Deregisters this worker from the bus. */
   _deregisterWorker: (() => void) | null = null
 
   constructor(workerId: number, mediaWorker: IMediaWorker, bus: IMessageBus) {
@@ -70,13 +69,11 @@ export class SfuWorker {
     this.transports = new Map();
     this.pendingConsumes = new Map();
 
-    // Announce this worker to the coordinator so the RouterAllocator can
-    // include it in allocation decisions.
+    // Announce this worker so RouterAllocator can include it in allocation.
     this._deregisterWorker = bus.registerMediaWorker(workerId);
   }
 
-  // Wires the death handler and registers bus consumers. Must be called
-  // once after construction; the worker is inert until then.
+  /** Registers worker death handling and bus consumers. */
   start(onDied: (err: Error) => void) {
     this.mediaWorker.onDied(onDied);
 
@@ -87,22 +84,20 @@ export class SfuWorker {
     );
   }
 
-  // TODO: Refactor this so the router handles this logic instead of calling this
-  // inside the transport update handler.
+  // TODO: Move consume creation and buffering to a router-level helper.
   _attemptConsuming(
     consumerTransport: WebRtcTransport,
     producerTransport: WebRtcTransport,
     rtpCapabilities: RtpCapabilities,
   ): Promise<IMediaConsumer | null> {
-    // The producer has to be already created and belong to the same router
-    // as consumerTransport. If not, return null so the caller can buffer
-    // the request until the producer is ready.
+    // The producer must already exist on the same router. Return null so the
+    // caller can buffer the request until production starts.
     const router = consumerTransport.router;
     if (!router.webRtcProducers.has(producerTransport.id)) {
       return Promise.resolve(null);
     }
     const producer = router.webRtcProducers.get(producerTransport.id)!;
-    // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+    // See https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
     return consumerTransport.mediaTransport.consume(producer.id, rtpCapabilities, true)
       .then((consumer) => {
         router.webRtcConsumers.set(consumerTransport.id, consumer);
@@ -111,6 +106,7 @@ export class SfuWorker {
       });
   }
 
+  /** Creates a consumer and acknowledges the original transport update. */
   _consumeAndAck(consumerTransport: WebRtcTransport,
     producingTransport: WebRtcTransport,
     rtpCapabilities: RtpCapabilities,
@@ -134,7 +130,7 @@ export class SfuWorker {
 
   onNewRouterRequest: QueueConsumerCallback<"newRouterRequest"> =
     async ({ assignedId, workerId }, ack, nack) => {
-      // Each worker only handles requests explicitly assigned to it.
+      // Each worker handles only requests explicitly assigned to it.
       if (workerId !== this.workerId) return;
       try {
         const router = await this.createRouter(assignedId);
@@ -148,7 +144,7 @@ export class SfuWorker {
     async ({ routerId, assignedId, isProducer }, ack, nack) => {
       const router = this.routers.get(routerId);
       if (router === undefined) {
-        // Router belongs to a different worker — skip silently.
+        // Router belongs to a different worker, so skip silently.
         return;
       }
 
@@ -157,7 +153,7 @@ export class SfuWorker {
 
         // TODO: Handle events emitted by the transport
 
-        // Register this transport
+        // Register this transport.
         const transport: WebRtcTransport = {
           id: assignedId, mediaTransport, router,
         };
@@ -167,7 +163,7 @@ export class SfuWorker {
         } else {
           router.webRtcConsumerTransports.set(assignedId, transport);
         }
-        // Send back the transport parameters
+        // Send back client transport parameters.
         ack({ options: mediaTransport.params });
       } catch (err: any) {
         nack(err);
@@ -180,7 +176,7 @@ export class SfuWorker {
 
       const transport = this.transports.get(id);
       if (transport === undefined) {
-        // Transport belongs to a different worker — skip silently.
+        // Transport belongs to a different worker, so skip silently.
         return;
       }
 
@@ -199,8 +195,7 @@ export class SfuWorker {
             // TODO: Handle events like "transportclose"
             ack({ id: producer.id });
 
-            // Flush any consume requests that arrived before this producer
-            // existed.
+            // Flush consume requests that arrived before this producer existed.
             const pending = this.pendingConsumes.get(id);
             if (pending !== undefined) {
               this.pendingConsumes.delete(id);
@@ -232,7 +227,7 @@ export class SfuWorker {
         }
         map.get(producingTransportId)!.add(id);
 
-        // If the producer for `producingTransportId` hasn't been created yet,
+        // If the producer for `producingTransportId` has not been created yet,
         // buffer this consume request and let the produce handler flush it.
         if (!transport.router.webRtcProducers.has(producingTransportId)) {
           if (!this.pendingConsumes.has(producingTransportId)) {

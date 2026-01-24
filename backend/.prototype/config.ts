@@ -1,18 +1,15 @@
-/*
-
-YAML configuration parser for the backend.
-
-Supported value forms per field:
-  - Scalar (pure): a direct string, number, or boolean.
-  - Env-var:       { env: VAR_NAME } — resolved from process.env at load time.
-  - Builder:       a named-argument object whose sub-fields may use any of the
-                   above forms. The parser calls a dedicated builder function
-                   for these fields; they do not accept scalar/env directly.
-
-The schema is encoded in the parser functions below; each field knows
-which forms it accepts.
-
-*/
+/**
+ * YAML configuration parser for the backend prototype.
+ *
+ * Fields can use three value forms:
+ *
+ * - Scalar: direct string, number, or boolean values.
+ * - Environment reference: `{ env: VAR_NAME }`, resolved from `process.env`.
+ * - Builder object: named objects parsed by dedicated builder functions.
+ *
+ * The parser functions below encode the schema and decide which value forms
+ * each field accepts.
+ */
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -20,7 +17,7 @@ import { parse as parseYaml } from "yaml";
 import type { TlsOptions } from "./utils/tls.ts";
 
 
-// ─── Internal resolution helpers ───────────────────────────────────────────
+// Internal resolution helpers.
 
 interface EnvSpec { env: string }
 
@@ -79,10 +76,9 @@ function asObject(
 }
 
 
-// ─── Builder parsers ────────────────────────────────────────────────────────
+// Builder parsers.
 
-// Reads cert files and returns TlsOptions. Paths are resolved relative to
-// the given base directory (the directory containing the config file).
+/** Reads TLS certificate files relative to the config file directory. */
 function buildTls(
   raw: unknown, baseDir: string,
 ): TlsOptions {
@@ -128,20 +124,41 @@ function buildHttpServer(raw: unknown): AppConfig["httpServer"] {
 }
 
 
-// ─── Public types and entry points ─────────────────────────────────────────
+// Public types and entry points.
 
+/** Parsed application configuration consumed by `app.ts`. */
 export interface AppConfig {
+  /** Browser origin allowed by Socket.IO CORS and HTTP preflight responses. */
   webOrigin: string;
+
+  /** Runtime environment string, with `development` as the default. */
   environment: string;
+
+  /** Signaling server ids and listen ports to instantiate. */
   signalingServers: Array<{ id: number; port: number }>;
+
+  /** Allocation strategy used when selecting a signaling server for joins. */
   channelAllocationStrategy: string;
+
+  /** Allocation strategy used when selecting an SFU worker for routers. */
   workerAllocationStrategy: string;
+
+  /** Frontend-facing HTTP API listen port. */
   httpServer: { port: number };
-  // null when environment !== "production" or when the tls section is absent.
+
+  /** TLS options, or null when HTTPS should not be enabled. */
   tls: TlsOptions | null;
+
+  /** SFU worker ids and WebRTC port ranges to instantiate. */
   sfuWorkers: Array<{ id: number; portRange: { min: number; max: number } }>;
 }
 
+/**
+ * Parses already-loaded YAML data into `AppConfig`.
+ *
+ * `configDir` is used to resolve relative file paths in builder fields such
+ * as `tls.keyPath` and `tls.certPath`.
+ */
 export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig {
   const r = asObject(raw, "<root>");
 
@@ -152,7 +169,7 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
   const workerAllocationStrategy = resolveOptionalString(
     r.workerAllocationStrategy, "workerAllocationStrategy", "round-robin");
 
-  // signalingServers is a builder-only array field.
+  // `signalingServers` is a builder-only array field.
   if (!Array.isArray(r.signalingServers) || r.signalingServers.length === 0) {
     throw new Error("config: signalingServers: expected a non-empty array");
   }
@@ -161,7 +178,7 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
 
   const httpServer = buildHttpServer(r.httpServer);
 
-  // tls is a builder-only field; it is optional and only applied in production.
+  // `tls` is a builder-only field. Non-production environments ignore it.
   let tls: TlsOptions | null = null;
   if (r.tls !== undefined && r.tls !== null) {
     if (environment !== "production") {
@@ -186,6 +203,7 @@ export function parseAppConfig(raw: unknown, configDir: string = "."): AppConfig
   };
 }
 
+/** Loads, parses, and resolves a YAML config file from disk. */
 export function loadConfig(configPath: string): AppConfig {
   const content = readFileSync(configPath, "utf-8");
   const raw = parseYaml(content);

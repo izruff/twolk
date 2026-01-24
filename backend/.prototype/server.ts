@@ -1,25 +1,3 @@
-/*
-
-Implementation for the WebSocket signaling server.
-- Maintains connection with client and updates state changes in the space.
-- Communicates with the coordinator on client join events.
-
-The server no longer talks to Socket.IO directly. New connections come in
-as `IClientChannel` instances from an `IClientChannelAcceptor`; per-channel
-state (join handshake, listeners, lifetime) is owned by `MemberSession`.
-The server itself keeps the cross-channel mirror of coordinator state
-(spaces, members) plus the `memberId → channel` registry used for
-outbound broadcasts.
-
-In the future, there should be another service to allow scaling these
-horizontally and manage communication between servers.
-
-Small note: A lot of these functions are not too complicated due to the
-fact that TypeScript runs on single-threaded event loop, so we don't have
-to worry about race conditions and order of operations too much.
-
-*/
-
 import type {
   IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
@@ -40,7 +18,8 @@ import mediasoup from "mediasoup";
 import mediasoupClient from "mediasoup-client";
 
 
-interface Member {
+/** Signaling-server-local member mirror. */
+export interface Member {
   id: number;
   owningSpace: Space;
 
@@ -48,15 +27,14 @@ interface Member {
   state: MemberState;
 }
 
+/** Signaling-server-local space mirror used for client snapshots. */
 export interface Space {
   uuid: string;
   data: SpaceData;
   members: Map<number, Member>;
 
-  // TODO: Right now, we make simplified assumptions about transport router allocation.
-  // We assume that the routerRtpCapabilities we receive are the same for all transports
-  // in the space. In reality, routerRtpCapabilities can differ between transports, and
-  // we have not made guarantees on where each transport will get allocated.
+  // TODO: Model router capabilities per transport if spaces can span routers.
+  // The current mirror assumes one router capability set per space.
   routerRtpCapabilities: mediasoup.types.RtpCapabilities;
 }
 
@@ -92,6 +70,7 @@ interface SpaceWideEventContentMap extends Record<SpaceWideEventType, any> {
 }
 
 
+/** Server-to-client event contract emitted through `IClientChannel`. */
 export interface ServerToClientEvents {
 
   connectionSuccessful: () => void;
@@ -126,9 +105,10 @@ export interface ServerToClientEvents {
 }
 
 
+/** Client-to-server event contract consumed by `MemberSession`. */
 export interface ClientToServerEvents {
 
-  // This is for client-side checks/retries
+  /** Client-side transport allocation retry or readiness check. */
   createWebRtcTransport: (
     args: { consumesFromMemberId?: number },
     cId: string,
@@ -167,15 +147,13 @@ export interface ClientToServerEvents {
     cId: string,
   ) => Promise<void>;
 
-  // TODO: For better failure handling, we should have the client send the
-  // consumerId rather than just memberId, since we assume the consumer might
-  // fail at any time.
+  // TODO: Include consumer ID so resume can target a specific consumer.
   transportConsumerResume: (
     args: { sourceMemberId: number },
     cId: string,
   ) => Promise<void>;
 
-  // TODO: We should restrict to client-sourced states only
+  // TODO: Restrict updates to client-sourced member state fields.
   updateMemberState: (
     args: { newState: Partial<MemberState> },
     cId: string,
@@ -187,6 +165,7 @@ type Channel = IClientChannel<ClientToServerEvents, ServerToClientEvents>;
 type Acceptor = IClientChannelAcceptor<ClientToServerEvents, ServerToClientEvents>;
 
 
+/** Builds the client-facing space projection from a signaling mirror. */
 export function getClientSideSpace(space: Space): ClientSideSpace {
   const clientSideMembers = Array.from(space.members.values()).map(
     (member) => getClientSideMember(member));
@@ -206,6 +185,20 @@ function getClientSideMember(member: Member): ClientSideMember {
 }
 
 
+/**
+ * Signaling server facade for client channels.
+ *
+ * The server accepts client channel connections, creates and manages member
+ * sessions, and keeps a local mirror of coordinator space and member state for
+ * channels it owns.
+ *
+ * TODO: Route member and state broadcasts through the coordinator so multiple
+ * signaling servers can stay in sync.
+ *
+ * TODO(mediasoup-decoupling): A lot of the types here still depend on
+ * `mediasoup`. We need to decouple them and use the types which will be
+ * defined in `media-port.ts` in the future.
+ */
 export class SignalingServer {
   serverId: number
   acceptor: Acceptor
@@ -216,9 +209,10 @@ export class SignalingServer {
   spaces: IStore<string, Space>
   members: IStore<number, Member>
 
-  // Cancellation handles for the bus subscriptions registered in start().
+  /** Cancellation handle for the bus subscription registered in `start()`. */
   _cancelConsumer: (() => void) | null = null
-  // Deregisters this server from the bus on disconnect.
+
+  /** Deregisters this signaling server from the bus. */
   _deregisterServer: (() => void) | null = null
 
   constructor(
@@ -236,16 +230,17 @@ export class SignalingServer {
     this.members = memberStore;
     this.memberIdToChannel = new Map();
 
-    // Announce this server to the coordinator via the bus so the
-    // ChannelPreAllocator can include it in allocation decisions.
+    // Announce this server so ChannelPreAllocator can route join requests.
     this._deregisterServer = bus.registerSignalingServer(serverId, serverUrl);
   }
 
-  // Builds the underlying Node + socket.io servers and the Socket.IO
-  // channel acceptor but does not listen on the port yet — that happens
-  // in start(). The server speaks https when given TlsOptions, http
-  // otherwise. Lets callers configure or swap collaborators before
-  // binding to the network.
+  /**
+   * Builds the default Socket.IO-backed signaling server.
+   *
+   * The returned instance does not listen until `start()` is called. Passing
+   * TLS options creates an HTTPS server and a `wss` URL; null creates HTTP and
+   * a `ws` URL.
+   */
   static create(serverId: number, tlsOptions: TlsOptions | null,
     ioOptions: Partial<ServerOptions>, port: number, bus: IMessageBus): SignalingServer {
     const httpServer = createNodeHttpServer(tlsOptions);
@@ -260,8 +255,7 @@ export class SignalingServer {
     );
   }
 
-  // Wires the channel handler, binds the HTTPS port, and subscribes to
-  // coordinator updates. Must be called once after construction.
+  /** Starts accepting channels and listening for coordinator space updates. */
   start() {
     this.acceptor.onChannel((channel) => {
       const session = new MemberSession(channel, this.bus, this);
@@ -304,21 +298,27 @@ export class SignalingServer {
     }
   }
 
-  // Called by MemberSession after a successful prepareMember + spaceInit
-  // emission, atomically with the spaceInit so no broadcast is missed.
+  /**
+   * Registers a member channel after `spaceInit` is emitted.
+   *
+   * This ordering prevents broadcasts from reaching the client before the
+   * initial snapshot.
+   */
   registerChannel(memberId: number, channel: Channel) {
     this.memberIdToChannel.set(memberId, channel);
   }
 
-  // Called by MemberSession on channel close. Idempotent.
+  /** Removes a member channel registration. Idempotent. */
   unregisterChannel(memberId: number) {
     this.memberIdToChannel.delete(memberId);
   }
 
+  /** Returns the local mirror for a subscribed space. */
   getSpace(uuid: string): Space | undefined {
     return this.spaces.get(uuid);
   }
 
+  /** Subscribes this signaling server to a space and mirrors its state. */
   async prepareSpace(uuid: string): Promise<void> {
     if (this.spaces.has(uuid)) {
       return Promise.resolve();
@@ -328,21 +328,20 @@ export class SignalingServer {
       this.bus.publish("subscribeToSpaceRequest", { serverId: this.serverId, uuid },
         ({ clientSideSpace, routerRtpCapabilities }) => {
           if (!this.spaces.has(uuid)) {
-            // Create the space and existing members object
+            // Mirror the space and its existing members locally.
             const space = this._addSpace(uuid, clientSideSpace.data,
               routerRtpCapabilities);
             clientSideSpace.members.forEach(({ id, data, state }) => {
               this._addMember(id, space, data, state);
             });
           } else {
-            // This should not happen since subscribeToSpaceRequest is only sent
-            // once, although this might change in the future.
+            // Duplicate subscribe ack for a space this server already mirrors.
             console.log("warning: spaceUuid already exists when calling prepareSpace");
           }
           resolve();
         },
         (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or client-visible join failure.
           throw new Error("failed to prepare space: " + e.message);
         });
     });
@@ -350,6 +349,7 @@ export class SignalingServer {
     return promise;
   }
 
+  /** Adds a member through the coordinator and mirrors it locally. */
   async prepareMember(spaceUuid: string,
     memberData: MemberData, memberState: MemberState): Promise<number> {
     if (!this.spaces.has(spaceUuid)) {
@@ -363,14 +363,12 @@ export class SignalingServer {
         if (!this.members.has(id)) {
           const space = this.spaces.get(spaceUuid);
           if (space === undefined) {
-            // This might happen if the space is already closed and the member
-            // came in late, but I'm not too sure.
+            // TODO: Handle late add-member ack after local space removal.
           } else {
             const member = this._addMember(id, space, memberData, memberState);
 
-            // Notify other members in the space (whose channels we own)
-            // This new member will not receive this and instead will get the
-            // spaceInit member event.
+            // Notify other local channels in the space. The new member receives
+            // `spaceInit` instead of this broadcast.
             space.members.forEach((_, otherId) => {
               if (otherId !== id && this.memberIdToChannel.has(otherId)) {
                 this.memberIdToChannel.get(otherId)!.emit("spaceWideEvent",
@@ -378,17 +376,15 @@ export class SignalingServer {
               }
             });
 
-            // TODO: Forward the notification to other servers via coordinator
-            // (this will be implemented later).
+            // TODO: Forward member joins to other signaling servers.
           }
         } else {
-          // This should not happen since addMemberRequest is only sent once,
-          // although this might change in the future.
+          // Duplicate add-member ack for a member this server already mirrors.
           console.log("warning: memberId already exists when calling prepareMember");
         }
         resolve(id);
       }, (e: Error) => {
-        // TODO: Need retry mechanism
+        // TODO: Add retry or client-visible join failure.
         throw new Error("failed to prepare member: " + e.message);
       })
     });
@@ -396,6 +392,7 @@ export class SignalingServer {
     return promise;
   }
 
+  /** Updates local member state and broadcasts it to local channels. */
   updateMember(memberId: number, update: Partial<MemberState>) {
     const member = this.members.get(memberId);
     if (member === undefined) {
@@ -403,7 +400,7 @@ export class SignalingServer {
     }
     member.state = { ...member.state, ...update };
 
-    // Notify all members in the space (whose channels we own)
+    // Notify all local channels in the space.
     member.owningSpace.members.forEach((_, id) => {
       if (this.memberIdToChannel.has(id)) {
         this.memberIdToChannel.get(id)!.emit("spaceWideEvent", "memberStateUpdate", {
@@ -412,10 +409,10 @@ export class SignalingServer {
       }
     });
 
-    // TODO: Forward the notification to other servers via coordinator
-    // (this will be implemented later).
+    // TODO: Forward member state updates to other signaling servers.
   }
 
+  /** Removes a member through the coordinator and updates local mirrors. */
   async deleteMember(memberId: number): Promise<void> {
     if (!this.members.has(memberId)) {
       return Promise.resolve();
@@ -428,9 +425,8 @@ export class SignalingServer {
             const space = this.members.get(memberId)!.owningSpace;
             this._removeMember(memberId);
 
-            // Notify other members in the space (whose channels we own)
-            // This member will not receive this and the client should
-            // disconnect on its own.
+            // Notify other local channels in the space. The removed member
+            // closes its own channel.
             space.members.forEach((_, otherId) => {
               if (otherId !== memberId && this.memberIdToChannel.has(otherId)) {
                 this.memberIdToChannel.get(otherId)!.emit("spaceWideEvent",
@@ -438,8 +434,7 @@ export class SignalingServer {
               }
             });
 
-            // TODO: Forward the notification to other servers via coordinator
-            // (this will be implemented later).
+            // TODO: Forward member leaves to other signaling servers.
 
             // When this server has no members left in the space, unsubscribe so
             // the coordinator can end the space once all servers have left.
@@ -449,14 +444,14 @@ export class SignalingServer {
               });
             }
           } else {
-            // This should not happen since deleteMember is called only once
+            // Duplicate delete-member ack for a member already removed locally.
             console.log("warning: member not found when calling deleteMember");
           }
 
           resolve();
         },
         (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or forced local cleanup after coordinator failure.
           throw new Error("failed to delete member: " + e.message);
         });
     });
@@ -464,6 +459,7 @@ export class SignalingServer {
     return promise;
   }
 
+  /** Unsubscribes from a space after this server has no local members in it. */
   async deleteSpace(spaceUuid: string): Promise<void> {
     if (!this.spaces.has(spaceUuid)) {
       return Promise.resolve();
@@ -480,7 +476,7 @@ export class SignalingServer {
           resolve();
         },
         (e: Error) => {
-          // TODO: Need retry mechanism
+          // TODO: Add retry or delayed local cleanup for failed unsubscribe.
           throw new Error("failed to delete space: " + e.message);
         });
     });
@@ -488,6 +484,7 @@ export class SignalingServer {
     return promise;
   }
 
+  /** Handles coordinator-originated space update events for local channels. */
   onSpaceUpdate: QueueConsumerCallback<"spaceUpdateStream"> =
     ({ uuid, type, payload }, ack, nack) => {
       if (type.startsWith("S:")) return;
@@ -501,13 +498,12 @@ export class SignalingServer {
       if (type === "C:transportParamsEvent") {
         const channel = this.memberIdToChannel.get(payload.memberId);
         if (channel === undefined) {
-          // Member not managed by this server — another server will handle it.
+          // Member belongs to another signaling server.
           ack();
           return;
         }
 
-        // Pass the transport parameters to the client.
-        // Send own memberId if producer, else send consumesFromMemberId.
+        // Send own member ID for producer transports, otherwise source member ID.
         channel.emit("memberEvent", "transportParams", {
           memberId: (payload.consumesFromMemberId ?? payload.memberId),
           options: payload.options,
@@ -516,7 +512,7 @@ export class SignalingServer {
         ack();
       } else if (type === "C:producerConnectedEvent") {
         if (!this.memberIdToChannel.has(payload.memberId)) {
-          // Member not managed by this server — another server will handle it.
+          // Producer belongs to another signaling server.
           ack();
           return;
         }

@@ -1,17 +1,34 @@
-/*
-
-Message bus port and in-process adapter.
-
-This is the seam between services (signaling server, coordinator, SFU worker).
-Today everything runs in one process and `InProcessBus` is a glorified
-callback registry. Later this same `IMessageBus` shape can sit in front of
-gRPC bidirectional streams without any caller needing to change.
-
-The wire contracts (`QueuePayloadTypeMap`, `QueueResponseTypeMap`, the
-`SpaceUpdate*` and `TransportUpdate*` discriminated unions) live here too —
-they describe what travels over the bus, independent of who's on either end.
-
-*/
+/**
+ * Message bus port and in-process adapter for prototype services.
+ *
+ * The message bus allows initiation and simulation of inter-service
+ * communication. It simulates communication with a publish-subscribe pattern
+ * that synchronously invokes consumer callbacks followed by ack/nack.
+ * Pub-sub queues with their payload and response formats are declared here,
+ * as they are the bus wire contract between services.
+ *
+ * `InProcessBus` is a single-threaded in-memory bus implementation for
+ * this prototype. This is only suitable for prototyping; a real implementation
+ * would use existing protocols and infrastructure, in particular gRPC and a
+ * message broker.
+ *
+ * The design of the bus interface reflects the asynchronous and decoupled
+ * nature of a real messaging network. Using this queue pattern not only
+ * induces this property, but also resembles the protocols and APIs of gRPC and
+ * message brokers, which will ease development later on.
+ *
+ * Note that there is currently no standardized format for implementing
+ * queue types and their payload/response shapes. A queue may be used for more
+ * than one related operations or used in both directions. The bus also cannot
+ * selectively fan out messages; if this is a requirement, each consumer must
+ * filter messages by some target ID or enum field in the payload.
+ *
+ * TODO(mediasoup-decoupling): A lot of the types here still depend on
+ * `mediasoup`. We need to decouple them and use the types which will be
+ * defined in `media-port.ts` in the future.
+ *
+ * @module
+ */
 
 import type mediasoup from "mediasoup";
 import type mediasoupClient from "mediasoup-client";
@@ -21,91 +38,109 @@ import type {
 } from "./domain.ts";
 
 
-// Most of these should have a message tag if we want to have more than one
-// signaling server or SFU worker, but we only use one for now, so no tags
-// needed.
-// TODO: The payloads for the result queues all assume that they never fail.
-// Currently, if something fails, the worker or signaling server throws an
-// error or process exits.
+/**
+ * Payload shape for each bus queue.
+ */
 export type QueuePayloadTypeMap = {
-  // CRUD on the Space object, forwarded from the HTTP server.
+  /** HTTP request to create a coordinator-side space. */
   createSpaceRequest: {
     data: SpaceData,
     policyType: string,
   };
+  /** HTTP request to read public state for a coordinator-side space. */
   readSpaceRequest: {
     uuid: string,
   };
-  // Requests from coordinator to create a new router for a space.
-  // workerId identifies which SfuWorker should handle this request;
-  // other workers skip it silently.
+  /** Coordinator request for one assigned worker to create a media router. */
   newRouterRequest: {
     assignedId: number,
     workerId: number,
   };
+  /** Coordinator request for the worker owning a router to create a transport. */
   newWebRtcTransportRequest: {
     routerId: number,
     assignedId: number,
     isProducer: boolean,
   };
+  /** Signaling server request to mirror and subscribe to a coordinator-side space. */
   subscribeToSpaceRequest: {
     serverId: number,
     uuid: string,
   };
+  /** Signaling server request to add a member to a coordinator-side space. */
   addMemberRequest: {
     serverId: number,
     spaceUuid: string,
     memberData: MemberData,
     memberState: MemberState,
   };
+  /** Signaling server request to remove a member from a coordinator-side space. */
   removeMemberRequest: {
     id: number,
   }
+  /** Signaling server request to stop mirroring a coordinator-side space. */
   unsubscribeFromSpaceRequest: {
     serverId: number,
     uuid: string,
   };
-  // Sent by the HTTP server to ask the coordinator which signaling server
-  // a joining client should connect to.
+  /** HTTP request to pre-allocate a signaling server for a joining client. */
   tryJoinSpaceRequest: {
     spaceUuid: string,
   };
+  /** Bidirectional update stream between signaling servers and coordinator. */
   spaceUpdateStream: { uuid: string } & {
     [K in SpaceUpdateTypes]: { type: K; payload: SpaceUpdatePayloadTypeMap[K] }
   }[SpaceUpdateTypes];
+  /** Bidirectional update stream between coordinator and SFU workers. */
   transportUpdateStream: { id: number } & {
     [K in TransportUpdateTypes]: { type: K; payload: TransportUpdatePayloadTypeMap[K] }
   }[TransportUpdateTypes];
 }
 
+/**
+ * Response shape for each bus queue, used as the single parameter for ack
+ * callbacks in that queue.
+ *
+ * A `void` response simply means no parameters are expected for the ack;
+ * the consumer still has to call `ack()`.
+ */
 export type QueueResponseTypeMap = {
+  /** Space creation response with the assigned UUID. */
   createSpaceRequest: {
     uuid: string,
   };
+  /** Public space metadata and lifecycle state. */
   readSpaceRequest: {
     data: SpaceData,
     status: SpaceStatus,
   };
+  /** Media router capabilities returned by the assigned SFU worker. */
   newRouterRequest: {
     rtpCapabilities: mediasoup.types.RtpCapabilities,
   };
+  /** Transport initialization parameters returned by the SFU worker. */
   newWebRtcTransportRequest: {
     options: mediasoupClient.types.TransportOptions,
   };
+  /** Current client-facing space state returned to a subscribing server. */
   subscribeToSpaceRequest: {
     clientSideSpace: ClientSideSpace;
     routerRtpCapabilities: mediasoup.types.RtpCapabilities;
   };
+  /** Member creation response with the assigned member ID. */
   addMemberRequest: {
     id: number,
   };
   removeMemberRequest: void;
   unsubscribeFromSpaceRequest: void;
+  /** Signaling server URL assigned to a joining client. */
   tryJoinSpaceRequest: {
     serverUrl: string,
   };
-  // The optional fields are populated for produce/consume responses so the
-  // signaling server can forward them to the client's ack.
+  /** Optional media data returned for produce and consume client acks. */
+  // TODO: It is a good idea to rethink this design; we cannot easily enforce
+  // the presence of these optional fields for each relevant event type, and
+  // it is not very scalable.
   spaceUpdateStream: void | {
     id: string,
     producerId?: string,
@@ -120,9 +155,10 @@ export type QueueResponseTypeMap = {
   };
 }
 
-// Maybe not the best way to do this? Ideally, the queue types should be defined before the other two.
+/** Queue names present in both payload and response contracts. */
 export type QueueTypes = keyof QueuePayloadTypeMap & keyof QueueResponseTypeMap;
 
+/** Consumer callback registered for one queue. */
 export type QueueConsumerCallback<K extends QueueTypes> = (
   payload: QueuePayloadTypeMap[K], ack: (resp: QueueResponseTypeMap[K]) => void, nack: (e: Error) => void
 ) => void;
@@ -132,19 +168,18 @@ type QueueConsumerCallbackCollection = {
 };
 
 
-// Space update stream messages
-// Types that start with 'S' come from the signaling server to the coordinator
-// Types that start with 'C' come from the coordinator to the signaling server
-
+/**
+ * Space update payloads sent from signaling servers to the coordinator.
+ */
 export type SpaceUpdateSPayloadTypeMap = {
-  // Sent on an attempt to initiate producer transport connection
+  /** Connects a member producer transport. */
   "S:memberProducerConnectEvent": {
     memberId: number,
     data: {
       dtlsParameters: mediasoup.types.DtlsParameters,
     },
   };
-  // Sent on an attempt to start producing media
+  /** Starts producing media on a member producer transport. */
   "S:memberProducerProduceEvent": {
     memberId: number,
     data: {
@@ -152,7 +187,7 @@ export type SpaceUpdateSPayloadTypeMap = {
       rtpParameters: mediasoup.types.RtpParameters,
     },
   };
-  // Sent on an attempt to initiate consumer transport connection
+  /** Connects a member consumer transport to a source member. */
   "S:memberConsumerConnectEvent": {
     memberId: number,
     data: {
@@ -160,7 +195,7 @@ export type SpaceUpdateSPayloadTypeMap = {
       sourceMemberId: number,
     },
   };
-  // Sent on an attempt to start consuming media
+  /** Starts consuming media from a source member. */
   "S:memberConsumerConsumeEvent": {
     memberId: number,
     data: {
@@ -168,8 +203,11 @@ export type SpaceUpdateSPayloadTypeMap = {
       sourceMemberId: number,
     },
   };
-  // Sent to resume a consumer that is consuming media
-  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+  /**
+   * Resumes a paused consumer.
+   *
+   * @see https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+   */
   "S:memberConsumerResumeEvent": {
     memberId: number,
     data: {
@@ -178,106 +216,151 @@ export type SpaceUpdateSPayloadTypeMap = {
   };
 };
 
+/**
+ * Space update payloads sent from the coordinator to signaling servers.
+ */
 export type SpaceUpdateCPayloadTypeMap = {
-  // Sent to provide transport parameters to client
+  /** Provides transport initialization parameters to the owning client. */
   "C:transportParamsEvent": {
     memberId: number,
     consumesFromMemberId?: number,
     options: mediasoupClient.types.TransportOptions,
   };
-  // Sent to notify that a producer has successfully connected and
-  // other members can start consuming.
+  /** Announces that a producer has connected and can be consumed. */
   "C:producerConnectedEvent": {
     memberId: number,
   };
 };
 
+/**
+ * Combined space update payload map.
+ *
+ * The `S:` prefix marks events originating from signaling servers, while
+ * the `C:` prefix marks events originating from the coordinator.
+ */
 export type SpaceUpdatePayloadTypeMap =
   SpaceUpdateSPayloadTypeMap & SpaceUpdateCPayloadTypeMap;
 
+/** Space update types sent from signaling servers to the coordinator. */
 export type SpaceUpdateSTypes = keyof SpaceUpdateSPayloadTypeMap;
+
+/** Space update types sent from the coordinator to signaling servers. */
 export type SpaceUpdateCTypes = keyof SpaceUpdateCPayloadTypeMap;
+
+/** All space update types. */
 export type SpaceUpdateTypes = keyof SpaceUpdatePayloadTypeMap;
 
 
-// Transport update stream messages
-// Types that start with 'W' come from the SFU worker to the coordinator
-// Types that start with 'C' come from the coordinator to the SFU worker
-
+/**
+ * Transport update payloads sent from SFU workers to the coordinator.
+ *
+ * TODO: Add worker-originated close and failure events.
+ */
 export type TransportUpdateWPayloadTypeMap = {
-  // Currently no messages from worker to coordinator
 };
 
+/**
+ * Transport update payloads sent from the coordinator to SFU workers.
+ */
 export type TransportUpdateCPayloadTypeMap = {
-  // Sent on an attempt to connect a producer/consumer transport to client
+  /** Connects a producer or consumer transport using remote DTLS parameters. */
   "C:transportConnectEvent": {
     dtlsParameters: mediasoup.types.DtlsParameters,
   };
-  // Sent on an attempt to start producing media
+  /** Starts producing media on a producer transport. */
   "C:transportProducerProduceEvent": {
     kind: mediasoup.types.MediaKind,
     rtpParameters: mediasoup.types.RtpParameters,
   };
-  // Sent on an attempt to start consuming media
+  /** Starts consuming media from an existing producer transport. */
   "C:transportConsumerConsumeEvent": {
     rtpCapabilities: mediasoup.types.RtpCapabilities,
     producingTransportId: number,
   };
-  // Sent to resume a consumer that is consuming media
-  // https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+  /**
+   * Resumes a paused consumer.
+   *
+   * @see https://mediasoup.org/documentation/v3/mediasoup/api/#transport-consume
+   */
   "C:transportConsumerResumeEvent": {};
 };
 
+/**
+ * Combined transport update payload map.
+ * The `W:` prefix marks events originating from SFU workers, while
+ * the `C:` prefix marks events originating from the coordinator. Note that
+ * currently there are no worker-originated events.
+ */
 export type TransportUpdatePayloadTypeMap =
   TransportUpdateWPayloadTypeMap & TransportUpdateCPayloadTypeMap;
 
+/** Transport update types sent from SFU workers to the coordinator. */
 export type TransportUpdateWTypes = keyof TransportUpdateWPayloadTypeMap;
+
+/** Transport update types sent from the coordinator to SFU workers. */
 export type TransportUpdateCTypes = keyof TransportUpdateCPayloadTypeMap;
+
+/** All transport update types. */
 export type TransportUpdateTypes = keyof TransportUpdatePayloadTypeMap;
 
 
-// Bidirectional, pub/sub-style message bus between services.
-//
-// `consume` attaches a callback to a queue; the returned function cancels the
-// subscription. In gRPC terms, this is "listen to a bidirectional stream,"
-// and `ack` / `nack` send the response.
-//
-// `publish` sends a payload to every current consumer of the queue. Each
-// consumer is expected to respond exactly once via the supplied `onAck` /
-// `onNack`. When more than one service is subscribed to the same queue the
-// publisher receives multiple responses; today consumers use a prefix on the
-// payload `type` field ("S:" / "C:" / "W:") to decide whether a given event
-// is theirs and skip otherwise.
-//
-// `registerSignalingServer` is called by each SignalingServer when it is
-// constructed. The bus fires `onSignalingServerConnected` callbacks and
-// returns a deregister function for when the server disconnects.
+/**
+ * Bidirectional message bus between prototype services.
+ *
+ * Consumers attach to named queues through `consume()` and respond by calling
+ * `ack()` or `nack()`. Calling `consume()` for each consumer-queue pair is
+ * meant to be done once at setup.
+ *
+ * The act of establishing a connection between the coordinator and another
+ * service is imitated through dedicated registration and subscription methods.
+ * These methods each return a cancellation function that the caller should
+ * call when a disconnection occurs.
+ *
+ * Publishers fan out to every current consumer of a queue, each calling the
+ * same ack/nack callbacks passed to `publish()`.
+ */
 export interface IMessageBus {
+  /** Subscribes to a queue and returns a cancellation function. */
   consume<K extends QueueTypes>(
     queueName: K, callback: QueueConsumerCallback<K>
   ): (() => void);
 
+  /** Publishes a payload to all current consumers of a queue. */
   publish<K extends QueueTypes>(
     queueName: K, payload: QueuePayloadTypeMap[K],
     onAck: (resp: QueueResponseTypeMap[K]) => void,
     onNack: (e: Error) => void,
   ): void;
 
+  /** Registers a signaling server. */
   registerSignalingServer(serverId: number, serverUrl: string): () => void;
+
+  /** Subscribes to signaling server registration events. */
   onSignalingServerConnected(cb: (serverId: number, serverUrl: string) => void): () => void;
+
+  /** Subscribes to signaling server deregistration events. */
   onSignalingServerDisconnected(cb: (serverId: number) => void): () => void;
 
-  // Called by each SfuWorker when constructed. Returns a deregister function.
+  /** Registers an SFU worker. */
   registerMediaWorker(workerId: number): () => void;
+
+  /** Subscribes to SFU worker registration events. */
   onMediaWorkerConnected(cb: (workerId: number) => void): () => void;
+
+  /** Subscribes to SFU worker deregistration events. */
   onMediaWorkerDisconnected(cb: (workerId: number) => void): () => void;
 }
 
 
-// In-process adapter for `IMessageBus`. Holds one callback set per queue and
-// synchronously fans out each publish to every current consumer. This is the
-// same broker simulation that previously lived inside `Coordinator`.
+/**
+ * In-process `IMessageBus` adapter.
+ *
+ * The adapter holds one callback set per queue and synchronously invokes every
+ * current consumer during `publish`. This models service messaging without
+ * adding a real broker to the prototype.
+ */
 export class InProcessBus implements IMessageBus {
+  /** Registered consumers grouped by queue name. */
   queueConsumerCallbacks: QueueConsumerCallbackCollection;
 
   private _serverConnectedCbs = new Set<(id: number, url: string) => void>();
@@ -286,7 +369,7 @@ export class InProcessBus implements IMessageBus {
   private _workerDisconnectedCbs = new Set<(id: number) => void>();
 
   constructor() {
-    // TODO: Automate this set instantiations
+    // TODO: Automate these set instantiations from the queue type map.
     this.queueConsumerCallbacks = {
       createSpaceRequest: new Set(),
       readSpaceRequest: new Set(),

@@ -12,6 +12,7 @@ flips into "no longer accepting" after `stop()`.
 
 import type {
   IClientChannel, IClientChannelAcceptor, EventMap,
+  EventArgs, EventHandlerFor,
 } from "../client-channel-port.ts";
 
 
@@ -42,7 +43,7 @@ export class FakeClientChannel<C2S extends EventMap, S2C extends EventMap>
     this.auth = auth;
   }
 
-  on<K extends keyof C2S>(event: K, handler: C2S[K]): void {
+  on<K extends keyof C2S>(event: K, handler: EventHandlerFor<C2S, K>): void {
     const name = event as string;
     if (!this._handlers.has(name)) {
       this._handlers.set(name, []);
@@ -50,14 +51,14 @@ export class FakeClientChannel<C2S extends EventMap, S2C extends EventMap>
     this._handlers.get(name)!.push(handler as any);
   }
 
-  off<K extends keyof C2S>(event: K, handler: C2S[K]): void {
+  off<K extends keyof C2S>(event: K, handler: EventHandlerFor<C2S, K>): void {
     const name = event as string;
     const handlers = this._handlers.get(name);
     if (handlers === undefined) return;
     this._handlers.set(name, handlers.filter((h) => h !== handler));
   }
 
-  emit<K extends keyof S2C>(event: K, ...args: Parameters<S2C[K]>): void {
+  emit<K extends keyof S2C>(event: K, ...args: EventArgs<S2C, K>): void {
     if (this._closed) return;
     this.emitted.push({ event: event as string, args: args as any[] });
   }
@@ -73,7 +74,7 @@ export class FakeClientChannel<C2S extends EventMap, S2C extends EventMap>
   // Test helpers ----------------------------------------------------------
 
   // Pretend the client emitted `event` with these args.
-  simulateClientEmit<K extends keyof C2S>(event: K, ...args: Parameters<C2S[K]>): void {
+  simulateClientEmit<K extends keyof C2S>(event: K, ...args: EventArgs<C2S, K>): void {
     const handlers = this._handlers.get(event as string);
     if (handlers === undefined) return;
     for (const h of [...handlers]) {

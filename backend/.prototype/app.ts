@@ -1,3 +1,7 @@
+/**
+ * The entry point of the prototype backend application.
+ */
+
 try {
   process.loadEnvFile();
 } catch {
@@ -17,8 +21,7 @@ import { MediasoupMediaWorker } from "./media-mediasoup.ts";
 import { RoundRobinStrategy } from "./allocation-strategy.ts";
 
 
-// Resolve config.yaml relative to this file so the path is correct
-// regardless of the working directory.
+// Resolve config.yaml relative to this module instead of the shell cwd.
 const CONFIG_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "config.yaml",
@@ -26,6 +29,7 @@ const CONFIG_PATH = path.resolve(
 
 const config = loadConfig(CONFIG_PATH);
 
+/** Builds the configured allocation strategy implementation. */
 function buildAllocationStrategy(name: string) {
   if (name === "round-robin") return new RoundRobinStrategy();
   throw new Error("unknown allocation strategy: " + name);
@@ -33,13 +37,13 @@ function buildAllocationStrategy(name: string) {
 
 const bus = new InProcessBus();
 
-// Coordinator must be constructed before any server or worker is created,
-// so it can subscribe to their registration events first.
+// Construct the coordinator before workers and servers so it can subscribe to
+// registration events before those collaborators announce themselves.
 const coordinator = new Coordinator(bus,
   buildAllocationStrategy(config.channelAllocationStrategy),
   buildAllocationStrategy(config.workerAllocationStrategy));
 
-// Each SfuWorker registers with the coordinator via the bus when constructed.
+// Each worker facade registers with the bus when constructed.
 const sfuWorkers = await Promise.all(
   config.sfuWorkers.map(async (wCfg) => {
     const mediaWorker = await MediasoupMediaWorker.create(wCfg.portRange);
@@ -47,7 +51,7 @@ const sfuWorkers = await Promise.all(
   })
 );
 
-// Each signaling server also registers via the bus when constructed.
+// Each signaling server registers with the bus when constructed.
 const signalingServers = config.signalingServers.map((srvCfg) =>
   SignalingServer.create(
     srvCfg.id,
@@ -67,8 +71,7 @@ const signalingServers = config.signalingServers.map((srvCfg) =>
 const httpServer = new FrontendFacingHttpServer(
   bus, config.httpServer.port, config.tls, config.webOrigin);
 
-// Start the coordinator and workers before the signaling servers so the
-// pipeline is ready before any client can connect.
+// Start coordinator and workers before accepting client channels.
 coordinator.start();
 sfuWorkers.forEach((w) => w.start((err) => { console.log(err); process.exit(1); }));
 signalingServers.forEach((s) => s.start());

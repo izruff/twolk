@@ -1,21 +1,3 @@
-/*
-
-Allocates and tracks mediasoup routers on behalf of spaces.
-
-Owns the `routers` map and the router-id counter. Allocation goes through
-the bus as `newRouterRequest` to whichever worker is chosen by the
-IAllocationStrategy. On success, the router's RTP capabilities are stored
-and the owning space's `primaryRouter` pointer is set.
-
-Worker registration events come in via the bus; the allocator maintains
-its own list of available worker IDs and uses the strategy to pick one
-per allocation.
-
-Removal cascades into the transport allocator so transports tied to the
-removed router are released.
-
-*/
-
 import type { IMessageBus } from "./bus.ts";
 import type { Router, Space } from "./domain.ts";
 import type { TransportAllocator } from "./transport-allocator.ts";
@@ -23,6 +5,21 @@ import type { IIdGenerator } from "./id-gen-port.ts";
 import type { IAllocationStrategy } from "./allocation-strategy.ts";
 
 
+/**
+ * Coordinator-side subservice that allocates and tracks media routers.
+ *
+ * This class owns router IDs and the coordinator router map. It also keeps
+ * track of available SFU workers through observers which the coordinator
+ * attaches to the bus. Workers own the actual media routers and are addressed
+ * through bus requests.
+ *
+ * TODO: This class currently only supports primary routers. We may want to
+ * support multiple routers per space in the future.
+ *
+ * TODO: This class should be extended to support router failure handling,
+ * removal, and re-allocation. Or perhaps some of these are better handled
+ * some other way.
+ */
 export class RouterAllocator {
   bus: IMessageBus
   transportAllocator: TransportAllocator
@@ -44,6 +41,7 @@ export class RouterAllocator {
     this._strategy = workerStrategy;
 
     bus.onMediaWorkerConnected((workerId) => {
+      // TODO: Reject or replace duplicate worker ids instead of appending them.
       this._workerIds.push(workerId);
     });
     bus.onMediaWorkerDisconnected((workerId) => {
@@ -55,9 +53,11 @@ export class RouterAllocator {
     return this.routers.get(routerId);
   }
 
-  // Allocates one router per space (the primary router). Picks the worker
-  // using the injected strategy; the chosen workerId is sent with the
-  // request so other workers skip it silently.
+  /**
+   * Allocates the primary router for a space.
+   *
+   * If the space already has a primary router, that router is returned.
+   */
   async allocate(space: Space): Promise<Router> {
     if (space.primaryRouter !== null) {
       return space.primaryRouter;
@@ -84,23 +84,26 @@ export class RouterAllocator {
           resolve(router);
         },
         (e: Error) => {
+          // TODO: Add proper failure handling and remove the pending router
+          // coordinator-side object.
           reject(new Error("newRouterRequest nacked: " + e.message));
         });
     });
   }
 
+  /** Removes a router and its coordinator-side transport records. */
   async remove(routerId: number): Promise<void> {
     const router = this.routers.get(routerId);
     if (router === undefined) {
       return;
     }
 
-    // Clean up associated transports
+    // Clean up associated transports.
     router.transports.forEach((transport) => {
       this.transportAllocator.remove(transport.id);
     });
 
-    // TODO: Need to send message to SFU worker to deallocate.
+    // TODO: Send a worker command to close the actual media router.
     this.routers.delete(routerId);
   }
 }

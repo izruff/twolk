@@ -1,19 +1,3 @@
-/*
-
-Manages members of spaces.
-
-Owns:
-- the `members` map (memberId → Member)
-- the member-id counter
-
-Handles the bus requests `addMemberRequest` and `removeMemberRequest`.
-Adding a member triggers the producer + N consumer transport allocations
-for the producer/consumer mesh. Removing a member tears down its
-transports and (if it was the last member and nobody is subscribed) asks
-the SpaceService to remove the empty space.
-
-*/
-
 import type {
   IMessageBus, QueueConsumerCallback,
 } from "./bus.ts";
@@ -25,6 +9,21 @@ import type { IStore } from "./store-port.ts";
 import type { IIdGenerator } from "./id-gen-port.ts";
 
 
+/**
+ * Coordinator-side subservice that manages coordinator-side members.
+ *
+ * This service stores member records and proxies of their associated media
+ * resources. It performs member management operations and handles the
+ * allocation of transports for each member and producer-consumer pairs.
+ *
+ * TODO: Currently, there is no mechanism for updating member states. This is
+ * because they are being done exclusively in individual signaling servers.
+ * We should add support for distributing member state updates once forwarding
+ * of updates from the server is supported. See the TODOs in `server.ts`.
+ *
+ * TODO: This service is tightly coupled with some other subservices. We should
+ * think about how to decouple them.
+ */
 export class MemberService {
   bus: IMessageBus
   spaceService: SpaceService
@@ -52,6 +51,7 @@ export class MemberService {
     this.idGen = idGen;
   }
 
+  /** Registers bus consumers handled by this service. */
   start() {
     this._cancelConsumers.push(
       this.bus.consume("addMemberRequest", this.onAddMemberRequest.bind(this)),
@@ -59,10 +59,12 @@ export class MemberService {
     );
   }
 
+  /** Returns the coordinator-side member record. */
   get(id: number): Member | undefined {
     return this.members.get(id);
   }
 
+  /** Adds a member to the service store and owning space. */
   add(data: MemberData, initialState: MemberState, space: Space): Member {
     const id = this.idGen.next();
     const member: Member = {
@@ -76,6 +78,7 @@ export class MemberService {
     return member;
   }
 
+  /** Removes a member from the service store and owning space. */
   remove(id: number) {
     const member = this.members.get(id);
     if (member === undefined) {
@@ -98,23 +101,22 @@ export class MemberService {
         return;
       }
 
-      // Make sure to allocate router first
+      // Ensure the space has a router before allocating member transports.
+      // TODO: This is also called in `SpaceService.applyTransition`. We need
+      // to decide who has the responsibility of allocating a router for the
+      // first time.
       this.routerAllocator.allocate(space)
         .then((router) => {
           const newMember = this.add(memberData, memberState, space);
 
-          // Allocate transports asynchronously
-          // First we allocate the producer transport for the new member
+          // Allocate the producer transport first, then start consumer mesh
+          // allocations asynchronously.
           this.transportAllocator.allocate(router, newMember, undefined)
             .then((newMemberTransport) => {
               newMember.producer = newMemberTransport;
-              // For every other member in the space:
-              //  - allocate a consumer transport for them to consume from
-              //    the new member (worker will buffer the consume until the
-              //    new member's producer is actually producing).
-              //  - allocate a consumer transport for the new member to
-              //    consume from them (their producer may or may not be
-              //    producing yet; the worker buffer handles both cases).
+              // For every other member, allocate one consumer transport in
+              // each direction when a source producer transport exists. The
+              // worker buffers consume requests until producers are ready.
               space.members.forEach((other) => {
                 if (other.id === newMember.id) return;
                 this.transportAllocator.allocate(router, other, newMemberTransport.id)
@@ -132,7 +134,7 @@ export class MemberService {
               });
             })
             .catch((e: any) => {
-              // TODO: Handle errors; we can just let the client retry.
+              // TODO: Roll back the member or expose a retryable join failure.
               console.log("failed to allocate producer transport: " + e.message);
             });
 
@@ -142,8 +144,7 @@ export class MemberService {
           nack(new Error("failed to allocate router: " + e.message));
         });
 
-      // TODO: Notify other members about the new member.
-      // Currently, we only have one signaling server, so this is not needed.
+      // TODO: Broadcast member joins across signaling servers through the coordinator.
     };
 
   onRemoveMemberRequest: QueueConsumerCallback<"removeMemberRequest"> =
@@ -156,7 +157,7 @@ export class MemberService {
 
       const space = member.owningSpace;
 
-      // Clean up transports associated with this member
+      // Clean up transports associated with this member.
       if (member.producer !== null) {
         this.transportAllocator.remove(member.producer.id);
       }
@@ -164,15 +165,14 @@ export class MemberService {
         this.transportAllocator.remove(transport.id);
       });
 
-      // Clean up member
+      // Clean up member.
       this.remove(id);
 
-      // Let the space's lifecycle policy decide whether to end the space.
+      // Let the lifecycle policy decide whether the space should end.
       this.spaceService.notifyMemberLeft(space.uuid);
 
       ack();
 
-      // TODO: Notify other members about the removal.
-      // Currently, we only have one signaling server, so this is not needed.
+      // TODO: Broadcast member removals across signaling servers through the coordinator.
     };
 }

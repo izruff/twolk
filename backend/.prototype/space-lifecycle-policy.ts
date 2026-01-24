@@ -1,24 +1,29 @@
-/*
-
-Interface for controlling when a space transitions between statuses:
-  "initialized" → "running" → "ended"
-
-Each hook returns the desired next status, or undefined to leave the
-current status unchanged. The `onCreated` hook receives a `transition`
-callback that policies can hold onto for asynchronous triggers (e.g. a
-timer-based policy that schedules the transition at a future timestamp).
-
-*/
-
 import type { SpaceStatus } from "./domain.ts";
 
 
+/**
+ * Policy port for deciding space lifecycle transitions.
+ *
+ * Spaces move through `initialized -> running -> ended`. A policy hook returns
+ * the desired next status, or `undefined` when the current status should stay
+ * unchanged.
+ */
 export interface SpaceLifecyclePolicy {
-  // Called once when the space is created. Receives a transition callback
-  // that can be stored and called later to trigger an async transition.
+  /**
+   * Called once after space creation.
+   *
+   * Policies may store `transition` to trigger asynchronous transitions, such
+   * as scheduled starts or time-limited sessions.
+   */
   onCreated(spaceId: string, transition: (to: SpaceStatus) => Promise<void>): void;
 
-  // Called when a signaling server subscribes to the space.
+  /** Called before a signaling server subscription is recorded. */
+  // TODO: This method is unusual because it is called before subscription
+  // state is updated. We should consider either adding hooks for state change
+  // failure, or changing it to an `onSubscribed` hook called after the state
+  // change. However, if implementing the latter, we should first figure out
+  // what to do with the call to `RouterAllocator.allocate()` in
+  // `SpaceService.applyTransition()`.
   onSubscribe(
     spaceId: string,
     currentStatus: SpaceStatus,
@@ -26,7 +31,7 @@ export interface SpaceLifecyclePolicy {
     memberCount: number,
   ): SpaceStatus | undefined;
 
-  // Called when a signaling server unsubscribes from the space.
+  /** Called after a signaling server subscription is removed. */
   onUnsubscribe(
     spaceId: string,
     currentStatus: SpaceStatus,
@@ -34,7 +39,7 @@ export interface SpaceLifecyclePolicy {
     memberCount: number,
   ): SpaceStatus | undefined;
 
-  // Called when a member leaves the space.
+  /** Called after a member is removed from the space. */
   onMemberLeft(
     spaceId: string,
     currentStatus: SpaceStatus,
@@ -42,6 +47,6 @@ export interface SpaceLifecyclePolicy {
     memberCount: number,
   ): SpaceStatus | undefined;
 
-  // Called after the space transitions to "ended".
+  /** Called after `SpaceService` transitions the space to `ended`. */
   onEnded(spaceId: string): void;
 }

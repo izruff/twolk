@@ -1,17 +1,19 @@
-/*
-
-In-process counter id generator. Each instance has its own counter, so
-two generators handed to different services produce independent
-sequences. Wraps at MAX_SAFE_INTEGER.
-
-*/
-
 import type { IIdGenerator } from "./id-gen-port.ts";
 
 
+/**
+ * Single-threaded incremental counter for temporary resources.
+ *
+ * Note that this counter wraps to zero after reaching an upper limit.
+ * This limit is quite high and it is expected that an ID is never used for
+ * two active resources at the same time. However, there is currently no
+ * mechanism to alert when this happens.
+ *
+ * TODO: The coordinator should enforce a resource limit mechanism, which
+ * will also interact with these ID generators.
+ */
 export class ProcessCounterIdGenerator implements IIdGenerator {
-  // These should be okay because these resources are not permanent and
-  // the traffic should not exceed this maximum limit.
+  /** The maximum limit of `counter` before it wraps to zero. */
   static MAX_COUNTER = Number.MAX_SAFE_INTEGER
 
   counter: number = 0
